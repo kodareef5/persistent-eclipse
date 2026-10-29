@@ -1,0 +1,19 @@
+{
+  "name": "persistent-eclipse",
+  "version": "0.7.0",
+  "private": true,
+  "description": "A persistent Git-native research lab for DeepSeek Harness and Pi: Red Team, Blue Team, Math Team, and session goals.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extension.ts"]
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.4.0"
+  }
+}

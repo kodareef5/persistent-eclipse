@@ -1,0 +1,11 @@
+### Source-led examples · Code
+
+| Published source | Observed research pattern | New question to borrow (not an asserted bug) |
+| --- | --- | --- |
+| [GitHub Security Lab — Gradio/CodeQL](https://github.blog/security/vulnerability-research/codeql-zero-to-hero-part-4-gradio-framework-case-study/) | Modeling the Gradio framework exposed **11 vulnerabilities** across applications. | Which popular framework lacks source/sink models, leaving an entire family of paths unexamined? |
+| [Microsoft — bootloader variants](https://www.microsoft.com/en-us/security/blog/2025/03/31/analyzing-open-source-bootloaders-finding-vulnerabilities-faster-with-ai/) | Shared filesystem-parsing code helped locate related U-Boot and Barebox flaws after GRUB2 research. | Which vendors copied a parser, and which assumptions changed at the new call sites? |
+| [Google — AI-assisted OSS-Fuzz](https://security.googleblog.com/2024/11/leveling-up-fuzzing-finding-more.html) | AI-generated fuzz targets exposed bugs despite long-running prior fuzzing, including OpenSSL CVE-2024-9143. | What valid parser mode or configuration remains unreachable from existing harnesses? |
+| [PortSwigger — cache parser divergence](https://portswigger.net/research/gotta-cache-em-all) | Different path interpretations across caches and origins produced novel deception and poisoning possibilities. | Does a new CDN adapter normalize URL paths differently from its origin? |
+| [Trail of Bits — audit context building](https://github.com/trailofbits/skills/blob/main/plugins/audit-context-building/skills/audit-context-building/SKILL.md) | Reads functions by assumptions, guarantees, and dependencies; unresolved `nothing found` checks are valuable leads. | Which helper's promise is trusted without any upstream enforcement? |
+| [Trail of Bits — variant analysis](https://github.com/trailofbits/skills/blob/main/plugins/variant-analysis/README.md) | A known bug seeds a narrowly matched pattern that is generalized across related code. | What changes if only the caller, parser, or sink is varied? |
+| [PortSwigger — 2025 top techniques](https://portswigger.net/research/top-10-web-hacking-techniques-of-2025) | Researchers surfaced parser differentials, ORM leakage, cache chains, and side channels. | Which “not injection” capability still leaks information or changes authorization? |
