@@ -16,7 +16,8 @@ The manager keeps shared records and commits reviewed work. Researchers own thei
 experiments and use the shared compute checkout when needed.
 
 Workers inherit your model unless the harness supports a switch and the operator
-has approved the exact alternative. Check the recorded list before each switch;
+has approved the exact alternative. Check the recorded routes and limits before
+each model or effort change, including the default effort on a changed model;
 pe-models covers approvals, accidental use, and ways to mix voices. Give each
 researcher a useful question; the most expensive voice needn't have the last word.
 
@@ -77,6 +78,12 @@ Every few hours, or when disk space runs low, take a few minutes at a natural pa
 Pi sends a reminder during goals, every six hours by default; `Housekeeping:` in
 LAB.md changes the interval or turns it `off`. In other runtimes, check the time
 occasionally as you work.
+
+In Pi, use `pe_archive_agents` to shorten the fleet list. It archives completed
+worker records only after six hours have passed since completion and at least ten
+newer workers have launched in this session. The newest ten workers and all
+running, failed, or cancelled workers stay listed. Archiving preserves task IDs,
+completed totals, artifacts, and transcripts; it does not reclaim disk space.
 
 See where the space went:
 

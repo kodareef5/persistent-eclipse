@@ -25,8 +25,9 @@ record and compute setup, then pick the skills that help with your question.
 
 ## Working together
 
-Workers use your current provider and model by default. Before choosing another,
-check harness support and the operator-approved routes under **Model permissions**
+Workers inherit your current provider, model, and effort by default. At each
+selection that changes any of these, check harness support and the approved
+routes and limits under **Model permissions**
 in `.research/LAB.md` (pe-models). Suggest additions, but wait for agreement.
 If an unapproved model runs, stop it and its retries, record and report the event,
 and remind the operator in round summaries until acknowledged. Continue the goal

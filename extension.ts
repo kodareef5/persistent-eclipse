@@ -17,11 +17,14 @@ Load a skill by reading its file.
 - Use \`pe_subagent\`, \`pe_send_message\`, \`pe_list_agents\`, and \`pe_interrupt_agent\`
   for the corresponding tools named in skills. Worker launches return immediately; their
   completion notices arrive between turns. Keep working while they run.
+- Use \`pe_archive_agents\` to hide old completed workers from the fleet list.
+  They must have finished over six hours ago and have at least ten newer workers.
+  Their artifacts, transcripts, task IDs, and completed count are kept.
 - \`Workers:\` in LAB.md sets concurrency (default 4, maximum 16). In a shared lab,
   \`git config pe.workers <n>\` overrides it for this clone. Changes apply at the next
   launch; workers above a lowered limit finish normally.
-- Workers inherit your model and thinking level. Before choosing another with
-  \`pe_subagent\`, check the operator-approved routes in LAB.md (pe-models).
+- Workers inherit your model and thinking level. Before each model or effort change
+  with \`pe_subagent\`, check the operator-approved routes and limits in LAB.md (pe-models).
   Use \`pe_list_models\` to see configured choices and supported
   efforts. A changed model without an effort uses Pi's default for that model.
   Workers receive your research tools, full MISSION.md, and suggested skill.
@@ -37,6 +40,10 @@ Load a skill by reading its file.
   merges, and pushes.
 - During goals, a housekeeping reminder arrives every six hours. The operator can
   change \`Housekeeping: <n>h\` or set it to \`off\` in LAB.md.
+- During an armed goal, fifteen idle minutes with workers running and at least two
+  free slots trigger a brief fleet check. It uses no goal round. Review worker ages
+  and activity, then investigate, delegate, or keep waiting; empty slots need no made-up work.
+  While you keep waiting, checks slow to every 30 minutes, then hourly.
 - The lab runs while Pi runs; there is no scheduling heartbeat. Use \`rg\` in
   \`bash\` for grep/glob tasks, and use only tools Pi lists.
 - Use \`/pe [request]\` to start or continue a lab, and \`/goal\` to steer goals.`;
@@ -44,6 +51,9 @@ Load a skill by reading its file.
 const GOAL_ENTRY = "pe-goal";
 const DEFAULT_ROUNDS = 256;
 const BLOCKED_AFTER = 3;
+const IDLE_REVIEW_MS = 15 * 60_000;
+// Each check the manager waits through doubles the next interval, up to four times.
+const idleDelay = (waited: number) => IDLE_REVIEW_MS * 2 ** Math.min(waited, 2);
 const GOAL_POLICY = `create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed. When a human asks to continue or resume a disarmed, paused, or blocked goal, in any wording or language, use update_goal action resume. Mark complete only when the objective is actually achieved. Mark blocked only after the same blocking condition persists for at least ${BLOCKED_AFTER} consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.`;
 
 type Skill = { name: string; description: string; filePath: string; baseDir: string };
@@ -179,7 +189,7 @@ function labState(cwd: string): string {
 	const lab = labRoot(cwd), file = lab && join(lab, ".research", "MISSION.md");
 	return `${lab ?? ""}\n${file && existsSync(file) ? readFileSync(file, "utf8") : ""}`;
 }
-const WORKER_TOOLS = ["pe_subagent", "pe_send_message", "pe_list_agents", "pe_interrupt_agent", "pe_list_models"];
+const WORKER_TOOLS = ["pe_subagent", "pe_send_message", "pe_list_agents", "pe_archive_agents", "pe_interrupt_agent", "pe_list_models"];
 const GOAL_TOOLS = ["get_goal", "create_goal", "update_goal"];
 const SEARCH_TOOL = "pe_web_search";
 // Pi has no web search of its own. This one asks OpenRouter, using the operator's key.
@@ -217,6 +227,7 @@ const span = (ms: number) => {
 const housekeepingPrompt = (every: number, disk: string) => `<housekeeping>
 It's been about ${span(every)}. When there's a good pause:
 - Tidy finished scratch work and update the task list and lab notes. The lab folder uses ${disk || "an unmeasured amount of disk"}. Keep anything still in use, cited, or waiting to be saved; pe-fleet has cleanup details. Commit loose ends and sync if enabled.
+- Use pe_archive_agents to remove eligible old completed workers from the fleet list; this preserves their artifacts and history.
 - Is there an idea we dismissed too quickly? Give one or two to a fresh reader who goes back to the source or proof. Leave room for new work too.
 - If it's been a while, try pe-muse or a web round. Follow a promising angle with a researcher.
 Then get back to the question you're chasing.
@@ -234,6 +245,7 @@ type Job = {
 	id: string; slot: number; skill: string; task: string; mission: string; folder: string; started: number; ended?: number;
 	model: NonNullable<ExtensionContext["model"]>; thinkingLevel?: ExtensionContext["thinkingLevel"];
 	status: "running" | "completed" | "failed" | "cancelled"; activity: string;
+	archived?: boolean;
 	stop?: string; session?: AgentSession; messages: string[]; work: Promise<void>;
 };
 
@@ -307,6 +319,8 @@ export default function (pi: ExtensionAPI) {
 	const jobs = new Map<string, Job>();
 	let slots = DEFAULT_WORKERS; // The lab's worker limit as last read.
 	let tidied = 0; // When the goal was armed or last reminded to tidy up.
+	let idleReview: ReturnType<typeof setTimeout> | undefined;
+	let waited = 0; // Fleet checks since a worker launched or finished or the operator spoke.
 	const disk = { lab: "", text: "", low: false, at: 0, busy: false }; // The lab's size, as last measured.
 	// Session hooks and the background timer request measurements, at most every ten minutes.
 	function measure(lab: string) {
@@ -368,8 +382,15 @@ export default function (pi: ExtensionAPI) {
 	const active = (cwd: string) => started || inLab(cwd);
 	const offered = (cwd: string) => (inLab(cwd) ? skills() : started ? skills().filter((s) => s.name === "pe-kickoff") : []);
 	const running = () => [...jobs.values()].filter((j) => j.status === "running");
+	// Map insertion order is launch order, including launches in the same millisecond.
+	// Keep archived records for task-ID uniqueness, completed totals, and this ordering.
+	function archivable(now = Date.now()): Job[] {
+		const all = [...jobs.values()];
+		return all.filter((j, i) => !j.archived && j.status === "completed" && j.ended !== undefined
+			&& now - j.ended > 6 * 3_600_000 && all.length - i - 1 >= 10);
+	}
 	const route = (j: Job) => `${j.model.provider}/${j.model.id} (${j.thinkingLevel ?? "default"})`;
-	const fleet = () => [...jobs.values()].map((j) =>
+	const fleet = () => [...jobs.values()].filter((j) => !j.archived).map((j) =>
 		`${j.id}  ${j.skill}  ${route(j)}  ${j.status}  ${elapsed(j.started, j.ended)}  ${j.activity}`).join("\n") || "PE: no workers.";
 
 	// Goals. Phases and revisions are durable session entries that follow the branch;
@@ -386,6 +407,7 @@ export default function (pi: ExtensionAPI) {
 	function save(next: Goal | null, arm: boolean) {
 		goal = next;
 		armed = arm && next?.phase === "active";
+		if (!armed) cancelIdleReview();
 		pi.appendEntry(GOAL_ENTRY, { version: 2, goal });
 		refresh();
 	}
@@ -405,6 +427,8 @@ export default function (pi: ExtensionAPI) {
 		save(bump({ phase: "active", blockedReason: undefined }), true);
 	}
 	function restoreGoal(ctx: ExtensionContext) {
+		cancelIdleReview();
+		waited = 0;
 		const entry = ctx.sessionManager.getBranch().findLast((e) => e.type === "custom" && e.customType === GOAL_ENTRY);
 		const data = entry?.type === "custom" ? entry.data as { version?: number; goal?: Goal | null } : undefined;
 		goal = data?.version === 2 ? data.goal ?? null : null;
@@ -429,11 +453,47 @@ export default function (pi: ExtensionAPI) {
 	}
 	// Start a round now when nothing else will: the session is idle and no worker notice is due.
 	function kick(ctx: ExtensionContext) {
-		if (!ctx.isIdle() || running().length) return;
+		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+		if (running().length) { scheduleIdleReview(ctx); return; }
 		const prompt = admit();
 		if (!prompt) return;
 		pi.appendEntry(GOAL_ENTRY, { version: 2, goal });
 		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: false }, { triggerTurn: true });
+	}
+
+	function cancelIdleReview() {
+		if (idleReview) clearTimeout(idleReview);
+		idleReview = undefined;
+	}
+	// Only a settled manager needs a nudge. A headless run waits at the settlement
+	// boundary instead; wake releases that wait after the nudge is queued.
+	function scheduleIdleReview(ctx: ExtensionContext, wake?: () => void) {
+		cancelIdleReview();
+		const eligible = () => armed && goal?.phase === "active" && inLab(ctx.cwd)
+			&& running().length > 0 && slots - running().length >= 2;
+		if (!eligible()) return;
+		const owner = generation, delay = idleDelay(waited);
+		idleReview = setTimeout(() => {
+			idleReview = undefined;
+			if (owner !== generation || !eligible() || (wake && ctx.signal?.aborted)
+				|| ctx.hasPendingMessages() || (!wake && !ctx.isIdle())) return;
+			// Like a worker notice, a check spends no goal round, so waiting on long
+			// experiments cannot exhaust the cap. It still speaks for the goal, not the operator.
+			human = false;
+			waited++;
+			const live = running();
+			const check = `<fleet_check>
+Objective: ${JSON.stringify(goal!.objective)}
+The manager has been idle for ${span(delay)} with at least two free worker slots.
+Now: ${slots - live.length}/${slots} slots free. Running workers (age, last observed activity):
+${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity}; brief: ${j.task.slice(0, 240)}`).join("\n")}
+
+Briefly check whether these experiments are still useful and whether an independent question deserves attention. You may investigate, delegate, steer a worker, or keep waiting. Age alone is not evidence of failure. Do not stop work or invent tasks just to fill slots. If waiting is appropriate, end this turn; the next check comes after ${span(idleDelay(waited))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
+</fleet_check>`;
+			pi.sendMessage({ customType: "pe-goal-round", content: check, display: false }, { triggerTurn: true });
+			wake?.();
+		}, delay);
+		idleReview.unref?.();
 	}
 
 	function refresh() {
@@ -657,6 +717,7 @@ who writes the shared record.`;
 			job.session = undefined;
 			job.ended = Date.now();
 			if (owner === generation) {
+				waited = 0;
 				refresh();
 				// A cancelled worker wakes the manager only when an armed goal is waiting on it.
 				// Steer, so a busy manager hears after its current turn, not after its whole run.
@@ -674,7 +735,7 @@ who writes the shared record.`;
 			skill: Type.Optional(Type.String({ description: "Optional starting skill or research lens. Workers can use all lab skills and tools." })),
 			provider: Type.Optional(Type.String({ minLength: 1, description: "Choose with model only after checking the operator-approved routes in LAB.md and pe_list_models. Omit both to inherit." })),
 			model: Type.Optional(Type.String({ minLength: 1, description: "Exact model ID, available here and approved by the operator if different from your current route. See pe-models. No automatic replacement." })),
-			reasoning_effort: Type.Optional(Type.String({ description: "A supported effort from pe_list_models. Omit to inherit on the same model, or use Pi's default on a changed model." })) }),
+			reasoning_effort: Type.Optional(Type.String({ description: "Before changing effort, re-read Model permissions in LAB.md and check the operator's limits. Use a supported effort from pe_list_models. Omit to inherit on the same model, or use Pi's default on a changed model; that default must also fit the approval." })) }),
 		async execute(_id, { taskId, task, skill = "pe-git-research", provider, model: modelId, reasoning_effort }, signal, _update, ctx) {
 			const cwd = requireLab(ctx);
 			if (signal?.aborted) throw new Error("Launch cancelled.");
@@ -703,6 +764,7 @@ who writes the shared record.`;
 			const slot = Array.from({ length: slots }, (_, i) => i).find((i) => !running().some((j) => j.slot === i))!;
 			const job: Job = { id: taskId, slot, skill, task, model, thinkingLevel, mission: direction, folder, started: Date.now(), status: "running", activity: "starting", messages: [], work: Promise.resolve() };
 			jobs.set(taskId, job);
+			waited = 0;
 			job.work = work(job, task, ctx);
 			refresh();
 			return result(`Started PE worker ${taskId} (${skill}, ${route(job)}) in ${folder}. Completion will be delivered automatically; keep working.`);
@@ -745,12 +807,28 @@ who writes the shared record.`;
 		},
 	});
 	pi.registerTool({ name: "pe_list_agents", label: "PE workers", defaultActive: false,
-		description: "List Persistent Eclipse worker tasks, states, elapsed times, and activity for steering, diagnosis, or a status request. Completion notices arrive automatically; do not use this tool to wait.",
+		description: "List unarchived Persistent Eclipse worker tasks, states, elapsed times, and activity for steering, diagnosis, or a status request. Completion notices arrive automatically; do not use this tool to wait.",
 		parameters: Type.Object({}),
 		async execute(_id, _args, _signal, _update, ctx) {
 			requireLab(ctx);
 			const count = running().length;
-			return result(`${fleet()}\n\n${count} running.${count ? " Completion notices arrive automatically; keep working or end your turn. Do not call pe_list_agents again just to wait." : ""}`);
+			const archived = [...jobs.values()].filter(j => j.archived).length, eligible = archivable().length;
+			return result(`${fleet()}\n\n${count} running.${count ? " Completion notices arrive automatically; keep working or end your turn. Do not call pe_list_agents again just to wait." : ""}`
+				+ (archived ? `\n${archived} completed worker records archived; artifacts and history kept.` : "")
+				+ (eligible ? `\n${eligible} completed worker records can be archived with pe_archive_agents.` : ""));
+		},
+	});
+	pi.registerTool({ name: "pe_archive_agents", label: "PE archive workers", defaultActive: false,
+		description: "Archive all eligible completed worker records from the fleet list. A worker must have finished more than six hours ago and have at least ten workers launched after it in this session. Running, failed, and cancelled workers stay listed. Preserves artifacts, transcripts, task IDs, and completed totals; does not delete files or free disk space.",
+		parameters: Type.Object({}),
+		async execute(_id, _args, _signal, _update, ctx) {
+			requireLab(ctx);
+			const eligible = archivable();
+			if (!eligible.length) return result("No completed worker records are eligible for archiving. Requires more than six hours since completion and at least ten newer workers.");
+			pi.appendEntry("pe-worker-archive", { taskIds: eligible.map(j => j.id) });
+			for (const job of eligible) job.archived = true;
+			refresh();
+			return result(`Archived ${eligible.length} completed worker records from the fleet list. Artifacts, transcripts, task IDs, and completed totals are unchanged. No files were deleted.`);
 		},
 	});
 	pi.registerTool({ name: "pe_interrupt_agent", label: "PE stop worker", defaultActive: false,
@@ -891,6 +969,7 @@ who writes the shared record.`;
 	}
 	pi.on("session_shutdown", async (event, ctx) => {
 		armed = false;
+		cancelIdleReview();
 		generation++; // Suppress late notices before the next session can start.
 		markInterrupted(running(), (event as { reason?: string }).reason ?? "shutdown");
 		await Promise.all([...jobs.values()].map((j) => stop(j)));
@@ -903,7 +982,7 @@ who writes the shared record.`;
 		refresh();
 	});
 	pi.on("input", (event) => {
-		if (event.source !== "extension") { human = true; streak = 0; }
+		if (event.source !== "extension") { human = true; streak = 0; waited = 0; }
 	});
 	pi.on("agent_settled", (event, ctx) => {
 		// An abort ends this turn, not the background work: workers keep running, as DSH
@@ -912,7 +991,7 @@ who writes the shared record.`;
 			if (human) { armed = false; refresh(); } else save(bump({ phase: "paused" }), false);
 			sync(ctx);
 		}
-		if (!due) return;
+		if (!due) { scheduleIdleReview(ctx); return; }
 		due = false;
 		const prompt = admit();
 		if (!prompt) { sync(ctx); ctx.ui.notify(goalText(), "info"); return; }
@@ -920,9 +999,23 @@ who writes the shared record.`;
 		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: false }, { triggerTurn: true });
 	});
 	pi.on("agent_before_settle", async (event, ctx) => {
+		cancelIdleReview();
 		due = false;
 		// Headless Pi must not exit before its workers and queued notices finish.
-		if (ctx.mode === "print" || ctx.mode === "json") await Promise.all(running().map((j) => j.work));
+		if (ctx.mode === "print" || ctx.mode === "json") {
+			const live = running();
+			if (event.outcome === "completed") {
+				if (live.length && !event.continue && !ctx.hasPendingMessages() && !event.context.pendingMessages.length) {
+					// The first completion has queued a notice; let the manager read it now.
+					const worker = await Promise.race([...live.map(j => j.work.then(() => j)),
+						new Promise<void>(resolve => scheduleIdleReview(ctx, resolve))]);
+					// Cancellation without an armed goal posts a notice but starts no turn.
+					if (worker && worker.status === "cancelled" && !(armed && goal?.phase === "active"))
+						await Promise.all(running().map(j => j.work));
+				}
+			} else await Promise.all(live.map(j => j.work));
+			cancelIdleReview();
+		}
 		if (!goal || goal.phase !== "active" || !armed) return;
 		// Aborts settle in agent_settled. A retry keeps this goal armed; an error
 		// without recovery leaves it active, disarmed, until the operator resumes it.
@@ -966,6 +1059,7 @@ who writes the shared record.`;
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
+		cancelIdleReview();
 		seen = labState(ctx.cwd);
 		human = event.messageType === "user";
 		if (human) streak = 0;
@@ -986,6 +1080,7 @@ who writes the shared record.`;
 			});
 		}
 	});
+	pi.on("turn_start", () => cancelIdleReview());
 
 	pi.registerCommand("pe", {
 		description: "PE: make this directory a lab, or keep working the lab it is in",

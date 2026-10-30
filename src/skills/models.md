@@ -24,8 +24,12 @@ notes alone doesn't grant permission.
 Record the agreed routes under **Model permissions** in `.research/LAB.md`, with
 who approved them, when, and any limits on tasks, spending, or effort. In a shared
 lab, say which lab each approval covers. If nothing else is approved, write
-“Additional models: none approved.” Re-read this list before every different-model
-launch, including reviews, experiments, and fallback choices. Check exact IDs;
+“Additional models: none approved.” Re-read this list at selection time before every
+launch that changes provider, model, or effort, including reviews, experiments,
+and fallback choices. Check the exact route and effective effort against the
+recorded task, spending, and effort limits. An omitted effort on a changed model
+uses that model's default; it must still fit those limits. If that default is
+unclear, select an explicit supported effort within the approval. Check exact IDs;
 don't guess from a similar name or borrow another lab's approval. If the list is
 missing or unclear, keep using your own model and ask the operator. Existing clear
 approval stands within its recorded scope; it doesn't need to be requested again.

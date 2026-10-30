@@ -113,7 +113,7 @@ function parse(request) {
     tools: (request.tools ?? []).map(t => t.function.name) }
 }
 
-const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_interrupt_agent', 'pe_list_models', 'pe_web_search'].sort()
+const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_archive_agents', 'pe_interrupt_agent', 'pe_list_models', 'pe_web_search'].sort()
 const goalTools = ['create_goal', 'get_goal', 'update_goal']
 // The goal a scripted model last read with get_goal, so it can name the exact revision.
 const lastGoal = request => {
@@ -1199,6 +1199,240 @@ finally:
     }
     await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'Keep at the slow experiment until it is done.'], tidyLab)
     check(reminded === 1, 'goals: a long goal gets one housekeeping reminder between turns at the lab interval', `saw ${reminded} reminders after ${stage} requests`)
+  }
+  // Real worker launches and archiving, with a clock offset only for completion
+  // age in this isolated package. Runtime timers and the six-hour rule stay intact.
+  {
+    const extensionFile = join(pkg, 'extension.ts'), extension = readFileSync(extensionFile, 'utf8')
+    const clockFile = join(scratch, 'archive-clock')
+    writeFileSync(clockFile, '0')
+    writeFileSync(extensionFile, extension
+      .replace('export default function (pi: ExtensionAPI)', `const archiveTestNow = () => Date.now() + Number(readFileSync(${JSON.stringify(clockFile)}, 'utf8'));\nexport default function (pi: ExtensionAPI)`)
+      .replace('function archivable(now = Date.now())', 'function archivable(now = archiveTestNow())')
+      .replace('job.ended = Date.now();', 'job.ended = archiveTestNow();'))
+    const dir = join(scratch, 'archive-lab')
+    mkdirSync(join(dir, '.research'), {recursive: true})
+    writeFileSync(join(dir, '.research', 'LAB.md'), '# Archive fixture\n')
+    const held = deferred(), s = goalSession(dir)
+    let nextCall
+    answer = async request => {
+      const id = workerId(request)
+      if (id === 'T-800' || id === 'T-600') { await held.promise; return 'Held worker finished.' }
+      if (id === 'T-700') return '' // Failed, not completed.
+      if (id) return 'Evidence retained.'
+      if (nextCall) { const call = nextCall; nextCall = undefined; return call }
+      return 'Acknowledged.'
+    }
+    const call = async (name, args = {}) => {
+      nextCall = tool(name, args)
+      const before = s.events.length
+      await s.rpc({type: 'prompt', message: 'Run the requested fixture operation.', streamingBehavior: 'followUp'})
+      let result
+      await until(() => {
+        result = s.events.slice(before).find(e => e.type === 'tool_execution_end' && e.toolName === name)?.result
+        return result !== undefined
+      }, () => `Archive fixture waiting for ${name}: ${JSON.stringify(s.events.slice(-8)).slice(-5000)}`)
+      // Wait for the manager's response before sending another RPC prompt.
+      await until(() => s.events.slice(before).some(e => e.type === 'agent_settled'), () => `Archive fixture waiting to settle after ${name}`)
+      return result.content.map(c => c.text ?? '').join('')
+    }
+    const launch = async id => {
+      await call('pe_subagent', {taskId: id, task: 'Retain evidence for archive testing.'})
+      if (id !== 'T-800' && id !== 'T-600') await until(() => s.events.some(e =>
+        e.type === 'agent_end' && e.messages?.some(m => m.customType === 'pe-worker' && m.details?.taskId === id)),
+        () => `Archive fixture waiting for ${id}: ${JSON.stringify(s.events.slice(-8)).slice(-5000)}`)
+    }
+    const ids = text => [...text.matchAll(/^(T-\d+)  /gm)].map(m => m[1])
+    try {
+      await launch('T-900')
+      await launch('T-800')
+      await launch('T-700')
+      await launch('T-600')
+      await call('pe_interrupt_agent', {taskId: 'T-600'})
+      for (let i = 1; i <= 6; i++) await launch(`T-${i}`)
+      // Ten total: the oldest has only nine newer workers, even after seven hours.
+      writeFileSync(clockFile, String(7 * 3_600_000))
+      check((await call('pe_archive_agents')).includes('No completed worker records'),
+        'archive: six-hour-old completions stay listed with fewer than ten newer workers')
+      await launch('T-7')
+      writeFileSync(clockFile, '0')
+      check((await call('pe_archive_agents')).includes('No completed worker records'),
+        'archive: ten newer launches do not bypass completion age')
+      writeFileSync(clockFile, String(7 * 3_600_000))
+      const beforeList = await call('pe_list_agents')
+      check(beforeList.includes('1 completed worker records can be archived'), 'archive: fleet lists eligible cleanup')
+      const evidence = join(dir, '.research/scratch/T-900/answer.md')
+      const transcript = join(dir, '.research/scratch/T-900/session')
+      const prior = readFileSync(evidence, 'utf8'), logs = readdirSync(transcript)
+      check((await call('pe_archive_agents')).includes('Archived 1 completed worker records'),
+        'archive: eligible completed worker is archived by launch order, not task ID')
+      let list = await call('pe_list_agents')
+      check(!ids(list).includes('T-900') && ids(list).length === 10 && list.includes('1 completed worker records archived'),
+        'archive: old completion leaves the list and the newest ten stay visible')
+      check(readFileSync(evidence, 'utf8') === prior && JSON.stringify(readdirSync(transcript)) === JSON.stringify(logs) &&
+        existsSync(join(dir, '.research/scratch/T-900/.done')),
+        'archive: answer, completion marker, and transcript files remain intact')
+      check((await call('pe_subagent', {taskId: 'T-900', task: 'Must not reuse archived task.'})).includes('already been used'),
+        'archive: archived task IDs cannot be reused')
+      for (let i = 8; i <= 17; i++) await launch(`T-${i}`)
+      await call('pe_archive_agents')
+      list = await call('pe_list_agents')
+      check(['T-800', 'T-700', 'T-600', 'T-7'].every(id => ids(list).includes(id)) &&
+        !ids(list).includes('T-1') && list.includes('7 completed worker records archived'),
+        'archive: old running, failed, cancelled, and recently completed workers stay visible')
+      check((await call('pe_archive_agents')).includes('No completed worker records'), 'archive: repeated cleanup is idempotent')
+      const archives = (await s.branch()).filter(e => e.customType === 'pe-worker-archive')
+      check(archives.length === 2 && archives.flatMap(e => e.data.taskIds).length === 7,
+        'archive: session history records exactly which workers were archived')
+    } finally {
+      await s.close(); held.resolve(); writeFileSync(extensionFile, extension); answer = async () => 'ok'
+    }
+  }
+  // Idle fleet checks use a short timeout only in this isolated package. The real
+  // worker requests stay open, reproducing a manager waiting on a lingering worker.
+  {
+    const extensionFile = join(pkg, 'extension.ts')
+    const extension = readFileSync(extensionFile, 'utf8')
+    const idleMs = 1000
+    check(extension.includes('const IDLE_REVIEW_MS = 15 * 60_000;'), 'idle review: production interval is fifteen minutes')
+    writeFileSync(extensionFile, extension.replace('const IDLE_REVIEW_MS = 15 * 60_000;', `const IDLE_REVIEW_MS = ${idleMs};`))
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    let sequence = 0
+    async function fixture({workers = 2, slots = 4, goal = true, cap = 8, headless = false} = {}) {
+      const dir = join(scratch, `idle-review-${sequence++}`)
+      mkdirSync(join(dir, '.research'), {recursive: true})
+      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: ${slots}\n`)
+      const release = Array.from({length: workers}, deferred)
+      const busy = deferred(), busyStarted = deferred()
+      let stage = 0, authorityTried = false, authorityDenied = false, completing = false
+      const reviews = new Map(), completions = []
+      answer = async request => {
+        const id = workerId(request)
+        if (id) {
+          if (headless && workers > 1 && id === 'T-1') await sleep(idleMs / 3)
+          else await release[Number(id.slice(2)) - 1].promise
+          return 'Worker finished.'
+        }
+        const user = parse(request).user
+        if (user.includes('PE worker T-1 completed')) completions.push(Date.now())
+        if (user.includes('<fleet_check>')) {
+          // Each check adds one message to the conversation; a tool call repeats the same one.
+          const nth = JSON.stringify(request.messages).split('<fleet_check>').length - 1
+          if (!reviews.has(nth)) reviews.set(nth, {at: Date.now(), text: user})
+          if (headless) {
+            if (!completing) { completing = true; return updateGoal(request, 'complete') }
+            release.forEach(r => r.resolve())
+          } else if (!authorityTried) {
+            authorityTried = true
+            return updateGoal(request, 'pause')
+          } else authorityDenied ||= toolResults(request).includes('requires a direct request from the operator')
+          return 'The workers are still useful. Keep waiting.'
+        }
+        if (user === 'BUSY_MANAGER') { busyStarted.resolve(); await busy.promise; return 'Finished my own check; keep waiting.' }
+        if (user === 'FINISH_GOAL') {
+          if (!completing) { completing = true; return updateGoal(request, 'complete') }
+          return 'Goal complete.'
+        }
+        if (goal && stage === 0) {
+          stage++
+          return tool('create_goal', {objective: 'Review useful work while experiments run.', max_goal_rounds: cap})
+        }
+        if (stage === (goal ? 1 : 0)) {
+          stage++
+          return {tools: release.map((_, i) => ['pe_subagent', {taskId: `T-${i + 1}`, task: `Wait for experiment ${i + 1}.`}])}
+        }
+        return 'Waiting for evidence.'
+      }
+      if (headless) {
+        await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'Run the experiment.'], dir)
+        return {reviews, completions}
+      }
+      const s = goalSession(dir)
+      await s.prompt('Run the experiment.')
+      return {s, reviews, release, busy, busyStarted, authorityDenied: () => authorityDenied,
+        close: async () => { await s.close(); release.forEach(r => r.resolve()); busy.resolve() }}
+    }
+    try {
+      const f = await fixture({cap: 2})
+      try {
+        check((await f.s.snapshot()).roundsStarted === 0, 'idle review: workers initially suppress ordinary goal rounds')
+        await until(() => f.reviews.size === 1 && f.authorityDenied())
+        const first = [...f.reviews.values()][0].text
+        check(first.includes('2/4 slots free') && first.includes('T-1:') && first.includes('T-2:') &&
+          first.includes('last observed activity') && first.includes('keep waiting'),
+          'idle review: two free slots wake the manager with worker context and permission to wait')
+        check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
+          'idle review: the nudge spends no round and cannot pause with operator authority')
+        await f.s.rpc({type: 'prompt', message: 'BUSY_MANAGER'})
+        await f.busyStarted.promise
+        await sleep(idleMs + 300)
+        check(f.reviews.size === 1, 'idle review: no nudge interrupts an active manager')
+        const settled = f.s.settled()
+        f.busy.resolve(); await f.s.waitSettled(settled)
+        await sleep(idleMs / 2)
+        check(f.reviews.size === 1, 'idle review: manager activity starts a fresh idle window')
+        await until(() => f.reviews.size === 2)
+        check(f.reviews.get(2).text.includes(`next check comes after 2 seconds`),
+          'idle review: the operator speaking resets the interval, and waiting doubles the next one')
+        await until(() => f.reviews.size === 3)
+        check(f.reviews.get(3).at - f.reviews.get(2).at >= 2 * idleMs && f.reviews.get(3).text.includes('next check comes after 4 seconds'),
+          'idle review: checks slow while the manager keeps waiting')
+        check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
+          'idle review: waiting through checks never exhausts the goal round cap')
+      } finally { await f.close() }
+
+      for (const config of [{workers: 3}, {workers: 1, slots: 2}, {goal: false}]) {
+        const f = await fixture(config)
+        try {
+          await sleep(idleMs + 300)
+          check(f.reviews.size === 0, `idle review: quiet with ${config.goal === false ? 'no goal' : 'only one free slot at capacity ' + (config.slots ?? 4)}`)
+        } finally { await f.close() }
+      }
+      for (const command of ['/goal pause', '/goal clear', 'FINISH_GOAL', '/pe-test-reload']) {
+        const f = await fixture()
+        try {
+          if (command === 'FINISH_GOAL') await f.s.prompt(command)
+          else await f.s.rpc({type: 'prompt', message: command})
+          await sleep(idleMs + 300)
+          check(f.reviews.size === 0, `idle review: ${command} cancels the pending check`)
+        } finally { await f.close() }
+      }
+      const aborted = await fixture()
+      try {
+        await aborted.s.rpc({type: 'prompt', message: 'BUSY_MANAGER'})
+        await aborted.busyStarted.promise
+        const before = aborted.s.settled()
+        await aborted.s.rpc({type: 'abort'}); await aborted.s.waitSettled(before)
+        aborted.busy.resolve()
+        await sleep(idleMs + 300)
+        check(aborted.reviews.size === 0, 'idle review: abort disarms nudges while workers remain running')
+        await aborted.s.rpc({type: 'prompt', message: '/goal resume'})
+        await until(() => aborted.reviews.size === 1)
+        check((await aborted.s.snapshot()).phase === 'active',
+          'idle review: an explicit resume rearms the timer even after an aborted turn')
+      } finally { await aborted.close() }
+      const completingWorker = await fixture()
+      try {
+        const before = completingWorker.s.settled()
+        await sleep(idleMs / 2)
+        completingWorker.release[0].resolve()
+        await completingWorker.s.waitSettled(before)
+        await sleep(idleMs / 2)
+        check(completingWorker.reviews.size === 0, 'idle review: a worker completion gets priority and resets the window')
+        await until(() => completingWorker.reviews.size === 1)
+        check([...completingWorker.reviews.values()][0].text.includes('3/4 slots free'), 'idle review: a remaining worker cannot suppress the later check')
+      } finally { await completingWorker.close() }
+
+      const headless = await fixture({workers: 1, headless: true})
+      check(headless.reviews.size === 1, 'idle review: headless Pi wakes at its worker-wait boundary')
+      const partial = await fixture({workers: 2, headless: true})
+      const review = [...partial.reviews.values()][0]
+      check(partial.completions.length > 0 && review?.text.includes('3/4 slots free') &&
+        review.at - partial.completions[0] >= idleMs,
+        'idle review: headless Pi handles a completion before checking the remaining worker')
+    } finally {
+      writeFileSync(extensionFile, extension)
+    }
   }
   answer = async () => 'ok'
 } catch (e) { failed = e }

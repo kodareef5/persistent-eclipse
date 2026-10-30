@@ -3197,7 +3197,8 @@
               experiments and use the shared compute checkout when needed.
 
               Workers inherit your model unless the harness supports a switch and the operator
-              has approved the exact alternative. Check the recorded list before each switch;
+              has approved the exact alternative. Check the recorded routes and limits before
+              each model or effort change, including the default effort on a changed model;
               pe-models covers approvals, accidental use, and ways to mix voices. Give each
               researcher a useful question; the most expensive voice needn't have the last word.
 
@@ -3258,6 +3259,12 @@
               Pi sends a reminder during goals, every six hours by default; `Housekeeping:` in
               LAB.md changes the interval or turns it `off`. In other runtimes, check the time
               occasionally as you work.
+
+              In Pi, use `pe_archive_agents` to shorten the fleet list. It archives completed
+              worker records only after six hours have passed since completion and at least ten
+              newer workers have launched in this session. The newest ten workers and all
+              running, failed, or cancelled workers stay listed. Archiving preserves task IDs,
+              completed totals, artifacts, and transcripts; it does not reclaim disk space.
 
               See where the space went:
 
@@ -5156,8 +5163,12 @@
               Record the agreed routes under **Model permissions** in `.research/LAB.md`, with
               who approved them, when, and any limits on tasks, spending, or effort. In a shared
               lab, say which lab each approval covers. If nothing else is approved, write
-              “Additional models: none approved.” Re-read this list before every different-model
-              launch, including reviews, experiments, and fallback choices. Check exact IDs;
+              “Additional models: none approved.” Re-read this list at selection time before every
+              launch that changes provider, model, or effort, including reviews, experiments,
+              and fallback choices. Check the exact route and effective effort against the
+              recorded task, spending, and effort limits. An omitted effort on a changed model
+              uses that model's default; it must still fit those limits. If that default is
+              unclear, select an explicit supported effort within the approval. Check exact IDs;
               don't guess from a similar name or borrow another lab's approval. If the list is
               missing or unclear, keep using your own model and ask the operator. Existing clear
               approval stands within its recorded scope; it doesn't need to be requested again.
@@ -5930,8 +5941,9 @@
 
                 ## Working together
 
-                Workers use your current provider and model by default. Before choosing another,
-                check harness support and the operator-approved routes under **Model permissions**
+                Workers inherit your current provider, model, and effort by default. At each
+                selection that changes any of these, check harness support and the approved
+                routes and limits under **Model permissions**
                 in `.research/LAB.md` (pe-models). Suggest additions, but wait for agreement.
                 If an unapproved model runs, stop it and its retries, record and report the event,
                 and remind the operator in round summaries until acknowledged. Continue the goal
