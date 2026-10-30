@@ -98,6 +98,32 @@ test('report uses recorded states, links, partial accounting, and search receipt
   assert.ok(text.includes('reported')); assert.ok(text.includes('estimate'));
 });
 
+test('search accounting counts all attempts once, including empty results, and preserves legacy receipts', () => {
+  const first = {prompt_tokens: 100, prompt_tokens_details: {cached_tokens: 0}, completion_tokens: 16, cost: .0012};
+  const second = {prompt_tokens: 200, prompt_tokens_details: {cached_tokens: 0}, completion_tokens: 16, cost: .0071};
+  const receipt = {model: 'search', retrieved: '2026-10-30', usage: second,
+    attempts: [{engine: 'parallel', results: 0, usage: first}, {engine: 'exa', results: 8, usage: second}]};
+  const got = aggregate([], [receipt, receipt]);
+  assert.equal(got.calls, 2);
+  assert.equal(got.rows[0].sums.input, 300);
+  assert.equal(got.rows[0].sums.output, 32);
+  assert.ok(Math.abs(got.rows[0].sums.cost - .0083) < 1e-10);
+  assert.equal(aggregate([], [receipt], got.receipts).calls, 2);
+  assert.equal(aggregate([], [{model: 'search', usage: first}]).calls, 1);
+});
+
+test('a failed fallback retains known spend and leaves missing usage unknown', () => {
+  const receipt = {model: 'search', attempts: [
+    {engine: 'parallel', results: 0, usage: {cost: .0012}},
+    {engine: 'exa', error: 'No credit'},
+  ]};
+  const got = aggregate([], [receipt]);
+  assert.equal(got.calls, 2);
+  assert.equal(got.rows[0].sums.cost, .0012);
+  assert.equal(got.rows[0].coverage.cost, 1);
+  assert.equal(got.receipts[1].cost, null);
+});
+
 test('archive restores reachable Git history, staged and loose work, logs, and extra inputs', async t => {
   const {root, lab, put} = fixture(t);
   const g = args => execFileSync('git', ['-C', lab, ...args], {encoding: 'utf8'});

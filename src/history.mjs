@@ -287,12 +287,18 @@ export function sessionCalls(log) {
   return {calls, tools};
 }
 
-function searchCall(receipt, origin = null) {
-  const u = receipt.usage ?? {}, cached = count(u.prompt_tokens_details?.cached_tokens), prompt = count(u.prompt_tokens);
-  return {identity: sha(`search:${sha(json(receipt))}`), origin, session: null, role: 'search', provider: 'openrouter', model: receipt.model ?? 'unknown', effort: 'unknown', kind: 'search', time: receipt.retrieved,
+function searchCalls(receipt, origin = null) {
+  const key = `search:${sha(json(receipt))}`;
+  // Attempts are separate billable calls. The top-level usage repeats the selected
+  // attempt; use it only for legacy receipts that do not contain attempt records.
+  const attempts = Array.isArray(receipt.attempts) && receipt.attempts.length ? receipt.attempts : null;
+  return (attempts ?? [receipt]).map((attempt, i) => {
+  const u = attempt.usage ?? {}, cached = count(u.prompt_tokens_details?.cached_tokens), prompt = count(u.prompt_tokens);
+  return {identity: sha(attempts ? `${key}:${i}` : key), origin, session: null, role: 'search', provider: 'openrouter', model: receipt.model ?? 'unknown', effort: 'unknown', kind: 'search', time: receipt.retrieved,
     input: prompt !== null && cached !== null && prompt >= cached ? prompt - cached : null,
     output: count(u.completion_tokens), cacheRead: cached, cacheWrite: null,
     reasoning: count(u.completion_tokens_details?.reasoning_tokens), total: total(u.total_tokens, [u.prompt_tokens, u.completion_tokens]), cost: number(u.cost), costKind: 'reported'};
+  });
 }
 
 export function aggregate(logs, search = [], shared = []) {
@@ -321,7 +327,7 @@ export function aggregate(logs, search = [], shared = []) {
     candidates.push(...list);
     for (const t of tools) if (!seenTools.has(t.identity)) { seenTools.add(t.identity); toolCounts[t.name] = (toolCounts[t.name] ?? 0) + 1; }
   }
-  candidates.push(...search.map(r => r.receipt ? searchCall(r.receipt, r.origin) : searchCall(r)), ...shared);
+  candidates.push(...search.flatMap(r => r.receipt ? searchCalls(r.receipt, r.origin) : searchCalls(r)), ...shared);
   for (const c of candidates) {
     const old = unique.get(c.identity);
     if (old) {

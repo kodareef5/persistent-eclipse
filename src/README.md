@@ -22,7 +22,9 @@ grades never become runtime routing rules. Both are skills read on demand.
 Model approval is checked at each selection by the instructions in `models.md`
 and Pi's worker tool descriptions, including effort-only changes and defaults.
 Pi validates configured access and supported efforts in code; it does not enforce
-the approvals recorded in LAB.md. DSH additionally enforces its operator-configured
+the approvals recorded in LAB.md. That is deliberate: capable models
+follow clear guidance, so `pe_subagent`'s description states the rule and a launch on
+a different route reminds the manager to stop it if it isn't approved. Keep it guidance. DSH additionally enforces its operator-configured
 provider/model allowlist at launch, including for explicit effort-only selections.
 That allowlist does not express effort limits; those remain an instruction check.
 
@@ -37,6 +39,17 @@ YAML used by DSH and Pi. No separate renderer is needed.
 
 - DSH loads `cordis.patch.yml` (`package.json` `dsh.bundle`).
 - Pi loads `extension.ts`, which reads `cordis.patch.yml` (`pi install <this repo>`).
+
+Pi's `pe_web_search` returns raw search results: titles, URLs, and excerpts that the
+agent reads itself. It uses the operator's OpenRouter key and the web plugin with
+Parallel fast, falling back to Exa fast. `deepseek/deepseek-v4.1-flash-1017`, with
+thinking disabled, only carries the request; its 16-token reply is discarded. Each
+search saves its sources, attempts, and usage in a receipt. `src/skills/web/search.md`
+records the routes evaluated, the preference order, and known gotchas; update it when
+a route changes.
+Failed searches keep receipts too. History counts each attempt's reported usage
+once, including empty searches before a fallback; missing usage stays unknown.
+The receipt's top-level `usage` describes the selected attempt for compatibility.
 
 During an armed Pi goal, a manager idle for fifteen minutes with workers still running
 and at least two free slots gets a brief fleet check. It includes worker ages and last

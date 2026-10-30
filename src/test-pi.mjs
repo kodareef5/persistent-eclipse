@@ -36,10 +36,19 @@ export default function(pi) {
   pi.registerTool({name: 'fixture_probe', label: 'Fixture helper', description: 'An installed research helper.',
     parameters: Type.Object({}), async execute() { appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event: 'probe'}) + '\\n'); return {content: [{type: 'text', text: 'Installed helper ran.'}], details: {}}; }});
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (url, options) => String(url) === 'https://openrouter.ai/api/v1/chat/completions'
-    ? (appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event: 'search', maxTokens: JSON.parse(options.body).max_tokens}) + '\\n'), Promise.resolve(new Response(JSON.stringify({choices: [{message: {content: 'Fixture search answer.',
-      annotations: [{url_citation: {title: 'Primary source', url: 'https://example.test/paper'}}]}}]}), {status: 200})))
-    : realFetch(url, options);
+  // Exercise search success, empty results, provider errors, and malformed responses.
+  globalThis.fetch = (url, options) => {
+    if (String(url) !== 'https://openrouter.ai/api/v1/chat/completions') return realFetch(url, options);
+    const request = JSON.parse(options.body), engine = request.plugins?.[0]?.engine, query = request.messages.at(-1).content;
+    appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event: 'search', request}) + '\\n');
+    const status = query.includes('no credit') && (!query.includes('empty parallel') || engine === 'exa') ? 402 : query.includes('parallel down') && engine === 'parallel' ? 503 : 200;
+    if (query.includes('invalid JSON')) return Promise.resolve(new Response('not JSON', {status: 200}));
+    if (query.includes('invalid shape')) return Promise.resolve(new Response('{}', {status: 200}));
+    const empty = query.includes('all empty') || query.includes('empty parallel') && engine === 'parallel';
+    return Promise.resolve(new Response(JSON.stringify(status === 200 ? {usage: {cost: engine === 'parallel' ? 0.0012 : 0.0071}, choices: [{message: {content: 'Discarded reply.',
+      annotations: empty ? [] : [{url_citation: {title: 'Primary source', url: 'https://example.test/paper', content: 'Fixture search excerpt from ' + engine + '.'}}]}}]}
+      : {error: {code: status, message: 'Fixture failure'}}), {status}));
+  };
   const worker = ctx => ctx.getSystemPrompt().match(/# Persistent Eclipse worker (T-\\d+)/)?.[1];
   for (const event of ['session_start', 'session_shutdown']) pi.on(event, (_event, ctx) => {
     const id = worker(ctx);
@@ -321,8 +330,9 @@ try {
   answer = async () => searched ? 'ok' : (searched = true, tool('pe_web_search', {query: 'probe'}))
   const search = await ask(lab, 'search the web')
   answer = async () => 'ok'
-  check(toolResults(requests.at(-1)).includes('No OpenRouter key. Ask the operator') && search.system.includes('pe-web'),
-    'lab: web search without a key asks the operator for one')
+  check(toolResults(requests.at(-1)).includes('No OpenRouter key. If it blocks the work, ask the operator once') &&
+    toolResults(requests.at(-1)).includes("pe-web's search routes") && search.system.includes('pe-web'),
+    'lab: web search without a key points to other routes and asks the operator once')
 
   // The manager's search path saves a receipt in its own lab; worker receipts stay in scratch.
   {
@@ -340,10 +350,48 @@ try {
       const receipts = readdirSync(intel).filter(name => /^search-.*\.json$/.test(name))
       const receipt = JSON.parse(readFileSync(join(intel, receipts[0]), 'utf8'))
       check(manager.system.includes('Start web discovery with `pe_web_search`, for the manager') &&
-        toolResults(requests.at(-1)).includes('Fixture search answer.') && receipts.length === 1 &&
-        receipt.query === query && receipt.sources[0].url === 'https://example.test/paper' &&
-        !JSON.stringify(receipt).includes('fixture-manager-search-key'),
-        'manager: discovery guidance names its search tool, which returns sources and keeps a credential-free intel receipt')
+        toolResults(requests.at(-1)).includes('Fixture search excerpt from parallel.') &&
+        !toolResults(requests.at(-1)).includes('Discarded reply.') && receipts.length === 1 &&
+        receipt.query === query && receipt.engine === 'parallel' && receipt.sources[0].url === 'https://example.test/paper' &&
+        receipt.usage.cost === 0.0012 && !JSON.stringify(receipt).includes('fixture-manager-search-key'),
+        'manager: discovery guidance names its search tool, which returns raw excerpts and keeps a credential-free intel receipt')
+
+      // A failed Parallel search falls back to Exa; an exhausted key stops at once and asks.
+      const searchAs = async q => { searched = false; answer = async () => searched ? 'Search complete.' : (searched = true, tool('pe_web_search', {query: q})); await ask(searchLab, 'Search.') }
+      await searchAs('ETH lower bounds, parallel down')
+      const fallback = readdirSync(intel).filter(name => /^search-.*\.json$/.test(name)).map(name => JSON.parse(readFileSync(join(intel, name), 'utf8'))).find(r => r.query.includes('parallel down'))
+      check(toolResults(requests.at(-1)).includes('Fixture search excerpt from exa.') && fallback?.engine === 'exa' &&
+        fallback.attempts.map(a => `${a.engine}:${a.status}`).join() === 'parallel:503,exa:200',
+        'search: a failed Parallel search falls back to Exa and records both attempts', JSON.stringify(fallback))
+      await searchAs('ETH lower bounds, no credit')
+      const tried = readFileSync(hooks, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.event === 'search' && e.request.messages.at(-1).content.includes('no credit'))
+      check(toolResults(requests.at(-1)).includes('OpenRouter search failed: parallel 402') && toolResults(requests.at(-1)).includes('OpenRouter credit') &&
+        tried.length === 1 && readdirSync(intel).filter(name => /^search-.*\.json$/.test(name)).length === 3,
+        'search: an exhausted key stops after one request, saves its failure receipt, and asks for credit or another route', String(tried.length))
+
+      const receiptFor = q => readdirSync(intel).filter(name => /^search-.*\.json$/.test(name))
+        .map(name => JSON.parse(readFileSync(join(intel, name), 'utf8'))).find(r => r.query === q)
+      const q = 'empty parallel, then no credit'
+      await searchAs(q)
+      const failedFallback = receiptFor(q)
+      check(toolResults(requests.at(-1)).includes('OpenRouter search failed: exa 402') &&
+        !toolResults(requests.at(-1)).includes('No results.') && failedFallback.attempts.length === 2 &&
+        failedFallback.attempts[0].usage.cost === 0.0012 && failedFallback.attempts[1].error,
+        'search: an empty first search cannot hide a fallback error, and its billed attempt is saved')
+      for (const malformed of ['invalid JSON', 'invalid shape']) {
+        await searchAs(malformed)
+        check(toolResults(requests.at(-1)).includes('OpenRouter search failed:') &&
+          !toolResults(requests.at(-1)).includes('No results.') && receiptFor(malformed).attempts.every(a => a.error),
+          `search: ${malformed} is a failure, not an empty result`)
+      }
+      await searchAs('all empty')
+      check(toolResults(requests.at(-1)).includes('No results.') && receiptFor('all empty').attempts.every(a => !a.error && a.results === 0),
+        'search: genuine empty results from both engines remain a successful empty search')
+      const beforeCost = reportData(searchLab).usage.rows.find(r => r.kind === 'search').sums.cost
+      await searchAs('empty parallel, then success')
+      const afterCost = reportData(searchLab).usage.rows.find(r => r.kind === 'search').sums.cost
+      check(toolResults(requests.at(-1)).includes('Fixture search excerpt from exa.') && Math.abs(afterCost - beforeCost - 0.0083) < 1e-10,
+        'search: history counts both billed attempts in a successful fallback, without counting selected usage twice')
     } finally {
       env.OPENROUTER_API_KEY = ''
       answer = async () => 'ok'
@@ -920,13 +968,15 @@ try {
   finally { env.OPENROUTER_API_KEY = '' }
   const receiptName = readdirSync(scratchFile('T-7', '')).find(n => /^search-.*\.json$/.test(n))
   check(readFileSync(scratchFile('T-7', 'result.txt'), 'utf8') === '42' && existsSync(scratchFile('T-7', '.done')) &&
-    ['computed 42', 'Installed helper ran.', 'Fixture search answer.'].every(text => researchResults.includes(text)),
+    ['computed 42', 'Installed helper ran.', 'Fixture search excerpt from parallel.'].every(text => researchResults.includes(text)),
     'workers: a general researcher writes and executes code, uses an installed helper, and searches the web')
   check(receiptName && JSON.parse(readFileSync(scratchFile('T-7', receiptName), 'utf8')).sources[0].url === 'https://example.test/paper' &&
     !existsSync(join(lab, '.research', 'intel')), 'workers: search receipts stay with their artifacts for manager review')
   const searches = readFileSync(hooks, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.event === 'search')
-  check(searches.length > 0 && searches.every(e => e.maxTokens === 4096),
-    'search: requests cap their answer, so a low-balance key is not refused for a 65k reservation', JSON.stringify(searches))
+  check(searches.length > 0 && searches[0].request.plugins[0].engine === 'parallel' && searches.every(e => e.request.max_tokens === 16 &&
+    e.request.model === 'deepseek/deepseek-v4.1-flash-1017' && e.request.reasoning?.enabled === false && e.request.plugins.length === 1 &&
+    e.request.plugins.every(p => p.id === 'web' && ['parallel', 'exa'].includes(p.engine) && p.mode === 'fast' && p.max_results === 8)),
+    'search: raw Parallel fast results first, carried by DeepSeek 1017 with thinking off and a 16-token reply', JSON.stringify(searches))
 
   // Skills are optional lenses, including those previously reserved for the manager.
   for (const [taskId, skill, heading] of [['T-8', 'pe-coderunner', '# Code Runner'], ['T-9', 'pe-dead-end', '# Dead End'], ['T-16', 'pe-intel', '# Intel']]) {

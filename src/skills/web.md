@@ -17,11 +17,19 @@ literature check, when a plateau needs an outside angle, and for upstream change
 
 ## Access
 
-Pi's search uses the operator's OpenRouter key. With no key, try available search
-or direct-source routes and tell the manager if missing access blocks the task.
-The manager can ask for `/login openrouter`, `OPENROUTER_API_KEY` in the environment,
-network access, or supplied sources. Do not repeat the same request every turn or
-turn a missing source into a guess. Keep credentials out of commands and lab files.
+Pi's search uses the operator's OpenRouter key and returns raw titles, URLs, and
+excerpts; you read and judge them, as you would any other search page. When it is
+unavailable, look at what this environment already offers before asking: another
+host's search tool, a search API key already in the environment, the keyless routes
+below, or sources the operator supplied. Then tell the manager, or ask the operator
+once, for what would fit best: `/login openrouter` or `OPENROUTER_API_KEY` in Pi's
+environment, OpenRouter credit, another search API key in the environment, or
+network access. Do not repeat the same request every turn or turn a missing source
+into a guess. Refer to keys by environment variable; keep them out of command text
+and lab files.
+
+## Search routes
+{{table:search}}
 
 ## Share what matters
 
