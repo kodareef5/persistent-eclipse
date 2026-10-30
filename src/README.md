@@ -67,8 +67,9 @@ Failed searches keep receipts too. History counts each attempt's reported usage
 once, including empty searches before a fallback; missing usage stays unknown.
 The receipt's top-level `usage` describes the selected attempt for compatibility.
 
-During an armed Pi goal, a manager idle for fifteen minutes with workers still running
-and at least two free slots gets a brief fleet check. It includes worker ages and last
+During an armed Pi goal, a manager idle for fifteen minutes with workers still running,
+and either at least two free slots or a worker past about 67 minutes (its footer cell
+red), gets a brief fleet check. It includes worker ages and last
 activity; the manager may investigate, delegate, or keep waiting. Like worker notices,
 checks use no goal rounds, so a lab waiting on long experiments doesn't exhaust its cap.
 They never stop workers automatically. Each check the manager waits through doubles
@@ -80,3 +81,11 @@ Pi's `pe_archive_agents` hides completed workers from `pe_list_agents` once they
 finished over six hours ago and at least ten newer workers have launched in the
 session. It preserves the completed count, task IDs, and all files. This is fleet
 list cleanup; disk cleanup remains a separate housekeeping task.
+
+Pi's footer gives each worker slot a cell: a dim ⣀ when free, and for a running worker
+a full braille stack with one gap circling it (⣾⣽⣻⢿⡿⣟⣯⣷), so a live worker visibly
+moves. Its color drifts smoothly through light yellow, blue, green, orange, red, and
+dark red, about 16.7 minutes each, and blinks dark red from 100 minutes. A terminal
+cell has one color, so the drift colors the whole stack rather than single dots.
+The fleet list and fleet checks name red and blinking workers for the manager, which
+cannot see the footer, and ask it to inspect them; age alone is not failure.

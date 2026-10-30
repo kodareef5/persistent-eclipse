@@ -1154,8 +1154,9 @@ try {
   check(lifecycle.filter(e => e.event === 'session_start').length === lifecycle.filter(e => e.event === 'session_shutdown').length,
     'workers: every SDK session emits shutdown to installed extensions before disposal')
 
-  // Exercise the real footer while the manager is idle: four pie-circle indicators,
-  // a freed middle slot, a failed worker, and readable age and goal state.
+  // Exercise the real footer while the manager is idle: four orbiting braille stacks whose
+  // colors drift with age, a freed middle slot, a failed worker, and the finished goal.
+  // Ages run 100 minutes in 3.3 s here.
   if (process.platform !== 'win32') {
     stage = 0
     let launched = false, readGoal = false, completedGoal = false
@@ -1194,18 +1195,17 @@ try:
             if not chunk: break
             output += chunk
         text = re.sub(chr(27) + re.escape('[') + '[0-9;]*m', '', output.decode('utf-8', 'replace'))
-        if not sent and 'Persistent Eclipse · ○ ○ ○ ○ · +0' in text:
+        if not sent and 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +0' in text:
             os.write(master, b'Read the fixture with four independent workers and a ten-round budget.\\r')
             sent = True
-        slots = [s.split() for s in re.findall('Persistent Eclipse · ([◴◷◶◵○ ]+) · ', text)]
-        active = [s for s in slots if len(s) == 4 and '○' not in s]
-        glyphs = '◴◷◶◵'
-        animated = all(len({s[i] for s in active}) > 1 for i in range(4))
-        independent = len({(glyphs.index(s[1]) - glyphs.index(s[0])) % 4 for s in active}) > 1
-        middle_free = any(len(s) == 4 and s[1] == '○' and all(s[i] != '○' for i in [0, 2, 3]) for s in slots)
-        finished = 'Persistent Eclipse · ○ ○ ○ ○ · +3 · !1' in text and 'goal complete' in text
-        if animated and independent and middle_free and 'oldest 0:01' in text and 'goal active' in text and finished:
-            print('ok   workers and goals: real TUI shows independent pie circles, stable slots, counts, and labeled age and goal state')
+        slots = [s.split() for s in re.findall('Persistent Eclipse · ([⠀-⣿ ]+) [+]', text)]
+        first = {s[0] for s in slots if len(s) == 4 and s[0] != '⣀'}
+        orbiting = len(first) >= 4 and first <= set('⣾⣽⣻⢿⡿⣟⣯⣷')
+        colors = {m for m in re.findall(chr(27) + re.escape('[') + '([0-9;]*)m[⠀-⣿]', output.decode('utf-8', 'replace'))}
+        middle_free = any(len(s) == 4 and s[1] == '⣀' and all(s[i] != '⣀' for i in [0, 2, 3]) for s in slots)
+        finished = 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +3 !1' in text and 'goal complete' in text
+        if orbiting and len(colors) >= 5 and middle_free and 'goal active' not in text and finished:
+            print('ok   workers and goals: real TUI shows orbiting braille stacks drifting through the age colors, stable slots, counts, and only a goal state that needs a look')
             break
     else:
         raise RuntimeError('TUI footer did not update: ' + output.decode('utf-8', 'replace')[-8000:])
@@ -1219,11 +1219,67 @@ finally:
         child.wait()
     os.close(master)
 `
-    const probe = spawn('python3', ['-c', terminalProbe, pi, lab], {cwd: scratch, env: {...env, TERM: 'xterm-256color'}, stdio: ['ignore', 'pipe', 'pipe']})
-    let terminalOutput = ''
-    probe.stdout.on('data', d => { terminalOutput += d }); probe.stderr.on('data', d => { terminalOutput += d })
-    const code = await new Promise(r => probe.on('close', r))
+    const ageFile = join(pkg, 'extension.ts'), unaged = readFileSync(ageFile, 'utf8')
+    check(unaged.includes('const AGE_FULL_MS = 100 * 60_000;'), 'workers: a worker cell blinks dark red at 100 minutes')
+    writeFileSync(ageFile, unaged.replace('const AGE_FULL_MS = 100 * 60_000;', 'const AGE_FULL_MS = 3300;'))
+    let terminalOutput = '', code
+    try {
+      const probe = spawn('python3', ['-c', terminalProbe, pi, lab], {cwd: scratch, env: {...env, TERM: 'xterm-256color'}, stdio: ['ignore', 'pipe', 'pipe']})
+      probe.stdout.on('data', d => { terminalOutput += d }); probe.stderr.on('data', d => { terminalOutput += d })
+      code = await new Promise(r => probe.on('close', r))
+    } finally { writeFileSync(ageFile, unaged) }
     check(code === 0, 'workers and goals: actual Pi TUI status and timer update together', terminalOutput)
+
+    // The name's news ticker, with its timings shortened in this isolated package.
+    const extensionFile = join(pkg, 'extension.ts'), extension = readFileSync(extensionFile, 'utf8')
+    const timing = 'const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120;'
+    check(extension.includes(timing), 'footer news: production ticker rests three minutes and steps every 120 ms')
+    writeFileSync(extensionFile, extension.replace(timing, 'const NEWS_FIRST = 500, NEWS_REST = 60_000, NEWS_PAUSE = 400, NEWS_STEP = 40;'))
+    const newsLab = join(scratch, 'news-lab')
+    mkdirSync(join(newsLab, '.research', 'notes'), {recursive: true})
+    writeFileSync(join(newsLab, '.research', 'LAB.md'), '# Lab\n')
+    writeFileSync(join(newsLab, '.research', 'MISSION.md'), missions['math-team'])
+    writeFileSync(join(newsLab, '.research', 'notes', 'R-1.md'), '---\nid: R-1\nkind: finding\nstate: supported\n---\n# R-1: one\n')
+    writeFileSync(join(newsLab, '.research', 'notes', 'R-2.md'), '---\nid: R-2\nkind: finding\nstate: open\n---\n# R-2: two\n')
+    const tickerProbe = `
+import fcntl, os, pty, re, select, struct, subprocess, sys, termios, time
+master, slave = pty.openpty()
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 35, 140, 0, 0))
+child = subprocess.Popen([sys.argv[1], '--no-session', '--provider', 'probe', '--model', 'probe'], cwd=sys.argv[2], stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+os.close(slave)
+output = b''
+try:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if select.select([master], [], [], 0.1)[0]:
+            try: chunk = os.read(master, 65536)
+            except OSError: break
+            if not chunk: break
+            output += chunk
+        text = re.sub(chr(27) + re.escape('[') + '[0-9;]*m', '', output.decode('utf-8', 'replace')).replace(chr(160), ' ')
+        frames = re.findall('(.{18}) · ⣀ ⣀ ⣀ ⣀ [+]0', text)
+        team = next((i for i, f in enumerate(frames) if 'Math Team' in f), None)
+        notes = next((i for i, f in enumerate(frames) if '1 supported' in f), None)
+        sliding = any(f.startswith('Eclipse   Math') for f in frames)
+        if team is not None and notes is not None and sliding and 'Persistent Eclipse' in frames[notes:]:
+            print('ok   footer news: the name slides out, headlines pass through its width, and the name returns')
+            break
+    else:
+        raise RuntimeError('TUI footer news did not play: ' + output.decode('utf-8', 'replace')[-8000:])
+finally:
+    child.terminate()
+    try: child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+    os.close(master)
+`
+    try {
+      const ticker = spawn('python3', ['-c', tickerProbe, pi, newsLab], {cwd: scratch, env: {...env, TERM: 'xterm-256color'}, stdio: ['ignore', 'pipe', 'pipe']})
+      let tickerOutput = ''
+      ticker.stdout.on('data', d => { tickerOutput += d }); ticker.stderr.on('data', d => { tickerOutput += d })
+      check(await new Promise(r => ticker.on('close', r)) === 0, 'footer news: actual Pi TUI plays the lab news in the name', tickerOutput)
+    } finally { writeFileSync(extensionFile, extension) }
   }
   // A worker that saves its own answer.md still completes; PE puts its reply beside it.
   {
@@ -1441,6 +1497,19 @@ finally:
           'idle review: waiting through checks never exhausts the goal round cap')
       } finally { await f.close() }
 
+      // A full fleet stays quiet until a worker turns red; ages run 100 minutes in 600 ms here.
+      const young = readFileSync(extensionFile, 'utf8')
+      writeFileSync(extensionFile, young.replace('const AGE_FULL_MS = 100 * 60_000;', 'const AGE_FULL_MS = 600;'))
+      try {
+        const red = await fixture({workers: 3})
+        try {
+          await until(() => red.reviews.size === 1)
+          const text = [...red.reviews.values()][0].text
+          check(text.includes("while a worker's footer cell is red") && text.includes('1/4 slots free') &&
+            /footer (red|dark red|blinking dark red): inspect it/.test(text),
+            'idle review: a red worker wakes a full fleet and is named for inspection')
+        } finally { await red.close() }
+      } finally { writeFileSync(extensionFile, young) }
       for (const config of [{workers: 3}, {workers: 1, slots: 2}, {goal: false}]) {
         const f = await fixture(config)
         try {

@@ -37,9 +37,16 @@ Load a skill by reading its file.
   the subject and spell out ambiguous acronyms. It uses the operator's OpenRouter key
   and returns raw excerpts; read and judge them yourself. Fetch known URLs directly;
   pe-web has other search routes and what to ask for when search is unavailable.
-- The footer shows disk use, commits to pull (↓) and push (↑), and open messages (✉).
-  Pi measures every ten minutes and fetches when sync is enabled. You handle pulls,
-  merges, and pushes.
+- Each running worker's footer cell is a braille stack with one gap circling it.
+  Its color drifts from light yellow through blue, green, and orange to red after
+  about 67 minutes, then dark red, and blinks dark red from 100. The operator watches those
+  colors: inspect red and blinking workers with pe_list_agents, their scratch, or
+  pe_send_message, to be sure they're making progress. Age alone isn't failure;
+  stop a worker only when it is stuck or no longer useful.
+- The footer shows worker slots and completions, inbox messages received (✉ ↓) and
+  sent (↑), the lab remote's size and commits to pull (+), and disk use; every few
+  minutes the name scrolls lab news. Pi measures every ten minutes and fetches when
+  sync is enabled. You handle pulls, merges, and pushes.
 - During goals, a housekeeping reminder arrives every six hours. The operator can
   change \`Housekeeping: <n>h\` or set it to \`off\` in LAB.md.
 - During an armed goal, fifteen idle minutes with workers running and at least two
@@ -169,18 +176,23 @@ function syncTarget(lab: string): { remote: string; branch: string } | undefined
 		return;
 	}
 }
-// Open messages to this lab, or to all, from other labs.
-function unread(lab: string, here: string | undefined): number {
+// Inbox messages to this lab, or to all, from other labs (how many still open), and
+// messages this lab sent.
+function mailbox(lab: string, here: string | undefined) {
+	const box = { received: 0, open: 0, sent: 0 };
 	const dir = join(lab, ".research", "inbox");
-	if (!here || !existsSync(dir)) return 0;
-	let n = 0;
+	if (!here || !existsSync(dir)) return box;
 	for (const file of readdirSync(dir).filter((f) => f.endsWith(".md"))) {
 		const head = /^---\n([\s\S]*?)\n---/.exec(readFileSync(join(dir, file), "utf8"))?.[1] ?? "";
 		const field = (key: string) => new RegExp(`^${key}:\\s*(.*)$`, "m").exec(head)?.[1].trim() ?? "";
 		const to = field("to").replace(/^\[|\]$/g, "").split(",").map((t) => t.trim());
-		if (field("state") === "open" && field("from") !== here && (to.includes(here) || to.includes("all"))) n++;
+		if (field("from") === here) box.sent++;
+		else if (to.includes(here) || to.includes("all")) {
+			box.received++;
+			if (field("state") === "open") box.open++;
+		}
 	}
-	return n;
+	return box;
 }
 // Run background git and du at low priority, without a terminal or Git credential prompts.
 const QUIET = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
@@ -210,6 +222,23 @@ type Goal = {
 	id: string; revision: number; objective: string; phase: "active" | "paused" | "blocked" | "complete";
 	roundsStarted: number; maxGoalRounds: number; blockedReason?: { code: string; message: string };
 };
+// A running worker's footer cell: a full braille stack with one gap circling it, while
+// its color drifts through the ages below. From 100 minutes it blinks dark red.
+const AGE_FULL_MS = 100 * 60_000;
+const AGES = ["light yellow", "blue", "green", "orange", "red", "dark red"] as const;
+const AGE_INSPECT = AGES.indexOf("red"); // From here the manager should look at the worker.
+const ORBIT = "⣾⣽⣻⢿⡿⣟⣯⣷", ORBIT_MS = 150; // The gap runs down the left side and up the right.
+const age = (ms: number) => {
+	const at = Math.max(0, ms) / AGE_FULL_MS * AGES.length;
+	return { stage: Math.min(AGES.length, Math.floor(at)), at };
+};
+const ageLabel = (ms: number) => {
+	const { stage } = age(ms);
+	return stage >= AGES.length ? "blinking dark red" : AGES[stage];
+};
+// What the fleet list and checks say about a running worker the operator sees as red.
+const ageNote = (ms: number) => age(ms).stage >= AGE_INSPECT
+	? `; footer ${ageLabel(ms)}: inspect it to be sure it is making progress` : "";
 const elapsed = (start: number, end = Date.now()) => {
 	const s = Math.floor((end - start) / 1000);
 	return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -245,6 +274,10 @@ const size = (bytes: number) => {
 	while (v >= 1024 && i < 3) { v /= 1024; i++; }
 	return `${v < 10 && i ? v.toFixed(1) : Math.round(v)}${"KMGT"[i]}`;
 };
+// The footer's name rests, and every few minutes becomes a news ticker: each headline
+// slides through the name's width, then the name rests a few seconds before the next.
+const NAME = "Persistent Eclipse", NEWS_GAP = "   ", NEWS_MAX = 64;
+const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120;
 const result = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
 type Job = {
 	id: string; slot: number; skill: string; task: string; mission: string; folder: string; started: number; ended?: number;
@@ -370,9 +403,90 @@ export default function (pi: ExtensionAPI) {
 			}
 			refresh();
 		});
+		survey(lab);
 	}
-	// With a lab remote: commits to pull and push, and open messages for this lab.
-	const remote = { lab: "", name: "", branch: "", behind: 0, ahead: 0, mail: 0, fetched: 0, busy: false };
+	// The lab's notes by state, and the newest one, for the footer's news.
+	const notes = { lab: "", states: new Map<string, number>(), latest: "" };
+	function survey(lab: string) {
+		const states = new Map<string, number>(), dir = join(lab, ".research", "notes");
+		try {
+			for (const file of readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+				const head = /^---\n([\s\S]*?)\n---/.exec(readFileSync(join(dir, file), "utf8"))?.[1] ?? "";
+				const state = /^state:[ \t]*(\S+)/m.exec(head)?.[1];
+				if (state) states.set(state, (states.get(state) ?? 0) + 1);
+			}
+		} catch { /* no notes yet */ }
+		Object.assign(notes, { lab, states, latest: notes.lab === lab ? notes.latest : "" });
+		quietly("git", ["log", "-1", "--diff-filter=A", "--format=", "--name-only", "--", ".research/notes"], lab, (out) => {
+			const file = out.split("\n").find((f) => f.endsWith(".md"));
+			if (notes.lab !== lab || !file) return;
+			try { notes.latest = /^# (.+)$/m.exec(readFileSync(join(lab, file), "utf8"))?.[1].trim() ?? ""; } catch { /* moved since */ }
+		});
+	}
+	let news: { start: number; tapes: string[][] } | undefined;
+	let newsTimer: ReturnType<typeof setTimeout> | undefined, newsFrame: ReturnType<typeof setInterval> | undefined;
+	function headlines(): string[] {
+		const lab = disk.lab, lines: string[] = [];
+		if (!lab) return lines;
+		try {
+			const team = /^# Mission:[ \t]*(.+)$/m.exec(readFileSync(join(lab, ".research", "MISSION.md"), "utf8"))?.[1].trim();
+			if (team) lines.push(team);
+		} catch { /* no recorded mission */ }
+		if (goal) lines.push(`Goal${goal.phase === "active" ? "" : ` (${goal.phase})`}: ${goal.objective}`);
+		const total = [...notes.states.values()].reduce((a, b) => a + b, 0);
+		const counted = ["supported", "open", "disputed", "refuted"].filter((k) => notes.states.get(k)).map((k) => `${notes.states.get(k)} ${k}`);
+		if (total) lines.push(`${total} notes${counted.length ? `: ${counted.join(", ")}` : ""}`);
+		if (notes.latest) lines.push(`Latest: ${notes.latest}`);
+		const live = running();
+		if (live.length) {
+			const oldest = live.reduce((a, b) => (a.started <= b.started ? a : b));
+			lines.push(`${live.length} running, oldest ${oldest.id} at ${elapsed(oldest.started)}`);
+		}
+		if (remote.open) lines.push(`${remote.open} open message${remote.open === 1 ? "" : "s"} in the inbox`);
+		// Code points, so a headline never splits a character; long ones end in an ellipsis.
+		return lines.map((line) => {
+			const chars = [...line.replace(/\s+/g, " ")];
+			return chars.length > NEWS_MAX ? `${chars.slice(0, NEWS_MAX - 1).join("").trimEnd()}…` : chars.join("");
+		});
+	}
+	function nameArea(now: number): string {
+		if (!news) return NAME;
+		let t = now - news.start;
+		for (const tape of news.tapes) {
+			const scroll = (tape.length - NAME.length) * NEWS_STEP;
+			if (t < scroll) {
+				const at = Math.floor(t / NEWS_STEP);
+				// Pi collapses and trims ASCII spaces in status text; no-break spaces keep the width.
+				return tape.slice(at, at + NAME.length).join("").replace(/ /g, "\u00a0");
+			}
+			t -= scroll + NEWS_PAUSE;
+			if (t < 0) return NAME;
+		}
+		return NAME;
+	}
+	function stopNews() {
+		if (newsTimer) clearTimeout(newsTimer);
+		if (newsFrame) clearInterval(newsFrame);
+		newsTimer = newsFrame = news = undefined;
+	}
+	function scheduleNews(delay: number) {
+		stopNews();
+		newsTimer = setTimeout(() => {
+			newsTimer = undefined;
+			if (!ui) return;
+			const tapes = headlines().map((line) => [...NAME, ...NEWS_GAP, ...line, ...NEWS_GAP, ...NAME]);
+			if (!tapes.length) { scheduleNews(NEWS_REST); return; }
+			news = { start: Date.now(), tapes };
+			newsFrame = setInterval(refresh, NEWS_STEP);
+			newsFrame.unref?.();
+			const length = tapes.reduce((n, tape) => n + (tape.length - NAME.length) * NEWS_STEP + NEWS_PAUSE, 0);
+			newsTimer = setTimeout(() => { scheduleNews(NEWS_REST); refresh(); }, length);
+			newsTimer.unref?.();
+		}, delay);
+		newsTimer.unref?.();
+	}
+	// With a lab remote: its size, commits to pull and push, and this lab's inbox.
+	const remote = { lab: "", name: "", branch: "", behind: 0, ahead: 0, bytes: 0, received: 0, open: 0, sent: 0, fetched: 0, busy: false };
 	let tick: ReturnType<typeof setInterval> | undefined;
 	function count(lab: string) {
 		quietly("git", ["rev-list", "--left-right", "--count", `HEAD...refs/remotes/${remote.name}/${remote.branch}`], lab, (out) => {
@@ -386,8 +500,8 @@ export default function (pi: ExtensionAPI) {
 	function watch(lab: string) {
 		const target = syncTarget(lab), name = target?.remote ?? "", branch = target?.branch ?? "";
 		if (remote.lab !== lab || remote.name !== name || remote.branch !== branch)
-			Object.assign(remote, { lab, name, branch, behind: 0, ahead: 0, mail: 0, fetched: 0 });
-		remote.mail = name ? unread(lab, localConfig(lab).get("pe.lab")) : 0;
+			Object.assign(remote, { lab, name, branch, behind: 0, ahead: 0, bytes: 0, received: 0, open: 0, sent: 0, fetched: 0 });
+		Object.assign(remote, name ? mailbox(lab, localConfig(lab).get("pe.lab")) : { received: 0, open: 0, sent: 0 });
 		if (!name) return;
 		count(lab);
 		if (remote.busy || Date.now() - remote.fetched < DISK_EVERY) return;
@@ -396,7 +510,13 @@ export default function (pi: ExtensionAPI) {
 		// A fetch moves only remote-tracking refs. Pulling stays with the agent.
 		quietly("git", ["fetch", "--quiet", "--no-recurse-submodules", "--no-write-fetch-head", name], lab, () => {
 			remote.busy = false;
-			if (remote.lab === lab) count(lab);
+			if (remote.lab !== lab) return;
+			count(lab);
+			// What the remote branch holds, measured from its fetched objects.
+			quietly("git", ["rev-list", "--objects", "--disk-usage", `refs/remotes/${name}/${branch}`], lab, (out) => {
+				const bytes = Number(out.trim());
+				if (remote.lab === lab && remote.name === name && bytes > 0) { remote.bytes = bytes; refresh(); }
+			});
 		});
 	}
 	function mission(cwd: string): string {
@@ -418,7 +538,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	const route = (j: Job) => `${j.model.provider}/${j.model.id} (${j.thinkingLevel ?? "default"})`;
 	const fleet = () => [...jobs.values()].filter((j) => !j.archived).map((j) =>
-		`${j.id}  ${j.skill}  ${route(j)}  ${j.status}  ${elapsed(j.started, j.ended)}  ${j.activity}`).join("\n") || "PE: no workers.";
+		`${j.id}  ${j.skill}  ${route(j)}  ${j.status}  ${elapsed(j.started, j.ended)}  ${j.activity}${j.status === "running" ? ageNote(Date.now() - j.started) : ""}`).join("\n") || "PE: no workers.";
 
 	// Goals. Phases and revisions are durable session entries that follow the branch;
 	// `armed` is not, so a restored, reloaded, or forked session never continues alone.
@@ -496,14 +616,18 @@ export default function (pi: ExtensionAPI) {
 	// boundary instead; wake releases that wait after the nudge is queued.
 	function scheduleIdleReview(ctx: ExtensionContext, wake?: () => void) {
 		cancelIdleReview();
-		const eligible = () => armed && goal?.phase === "active" && inLab(ctx.cwd)
-			&& running().length > 0 && slots - running().length >= 2;
+		const eligible = () => armed && goal?.phase === "active" && inLab(ctx.cwd) && running().length > 0;
+		// Two free slots may deserve new work; a worker the operator sees as red deserves a look.
+		const reason = () => slots - running().length >= 2 ? "with at least two free worker slots"
+			: running().some((j) => age(Date.now() - j.started).stage >= AGE_INSPECT) ? "while a worker's footer cell is red" : "";
 		if (!eligible()) return;
 		const owner = generation, delay = idleDelay(waited);
 		idleReview = setTimeout(() => {
 			idleReview = undefined;
 			if (owner !== generation || !eligible() || (wake && ctx.signal?.aborted)
 				|| ctx.hasPendingMessages() || (!wake && !ctx.isIdle())) return;
+			const why = reason();
+			if (!why) { scheduleIdleReview(ctx, wake); return; } // A full, young fleet: look again later.
 			// Like a worker notice, a check spends no goal round, so waiting on long
 			// experiments cannot exhaust the cap. It still speaks for the goal, not the operator.
 			human = false;
@@ -511,9 +635,9 @@ export default function (pi: ExtensionAPI) {
 			const live = running();
 			const check = `<fleet_check>
 Objective: ${JSON.stringify(goal!.objective)}
-The manager has been idle for ${span(delay)} with at least two free worker slots.
+The manager has been idle for ${span(delay)} ${why}.
 Now: ${slots - live.length}/${slots} slots free. Running workers (age, last observed activity):
-${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity}; brief: ${j.task.slice(0, 240)}`).join("\n")}
+${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity}${ageNote(Date.now() - j.started)}; brief: ${j.task.slice(0, 240)}`).join("\n")}
 
 Briefly check whether these experiments are still useful and whether an independent question deserves attention. You may investigate, delegate, steer a worker, or keep waiting. Age alone is not evidence of failure. Do not stop work or invent tasks just to fill slots. If waiting is appropriate, end this turn; the next check comes after ${span(idleDelay(waited))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
 </fleet_check>`;
@@ -531,36 +655,47 @@ Briefly check whether these experiments are still useful and whether an independ
 				? { kind: "rgb", r: 35, g: 105, b: 215 } : { kind: "rgb", r: 77, g: 163, b: 255 } });
 			// Show the limit, or more while workers started under a higher limit finish.
 			const shown = Math.max(slots, ...live.map((j) => j.slot + 1));
+			const light = theme.appearance === "light";
+			// Light yellow, blue, green, orange, red, dark red, and the final blinking dark red.
+			const palette = (light
+				? [[176, 138, 0], [35, 105, 215], [20, 140, 60], [215, 110, 0], [200, 40, 30], [150, 20, 20], [120, 0, 0]]
+				: [[255, 232, 140], [77, 163, 255], [90, 205, 120], [255, 160, 60], [240, 80, 70], [185, 40, 40], [150, 10, 10]]);
+			// Each color blends into the next over its stretch of the worker's age.
+			const tint = (at: number) => {
+				const i = Math.min(Math.floor(at), palette.length - 1), f = Math.min(at - i, 1), next = palette[Math.min(i + 1, palette.length - 1)];
+				const [r, g, b] = palette[i].map((c, k) => Math.round(c + (next[k] - c) * f));
+				return { kind: "rgb" as const, r, g, b };
+			};
 			const cells = Array.from({ length: shown }, (_, slot) => slot).map((slot) => {
 				const job = live.find((j) => j.slot === slot);
-				if (!job) return theme.fg("dim", "○");
-				// Separate start times and cadences keep the slots moving independently.
-				return blue("◴◷◶◵"[(Math.floor((now - job.started) / (160 + slot * 40)) + slot) % 4]);
+				if (!job) return theme.fg("dim", "⣀");
+				const { stage, at } = age(now - job.started);
+				const glyph = ORBIT[Math.floor((now - job.started) / ORBIT_MS) % ORBIT.length];
+				if (stage >= AGES.length && Math.floor(now / 600) % 2) return theme.fg("dim", glyph);
+				return theme.style(glyph, { fg: tint(at) });
 			}).join(" ");
 			const done = [...jobs.values()].filter((j) => j.status === "completed").length;
 			const failed = [...jobs.values()].filter((j) => j.status === "failed").length;
-			const parts = [theme.fg("muted", "Persistent Eclipse"), cells,
-				theme.fg(done ? "success" : "dim", `+${done}`)];
-			if (failed) parts.push(theme.fg("error", `!${failed}`));
-			if (live.length) {
-				const oldest = Math.min(...live.map((j) => j.started));
-				// Amber is an age cue after ten minutes, not a claim that the worker is stuck.
-				parts.push(theme.fg(now - oldest >= 600_000 ? "warning" : "muted", `oldest ${elapsed(oldest, now)}`));
-			}
-			if (goal) {
+			const parts = [theme.fg("muted", nameArea(now)),
+				`${cells} ${theme.fg(done ? "success" : "dim", `+${done}`)}${failed ? ` ${theme.fg("error", `!${failed}`)}` : ""}`];
+			// A goal running as armed is the quiet default, and its objective is news.
+			if (goal && !(goal.phase === "active" && armed)) {
 				const label = `goal ${goal.phase === "active" && !armed ? "awaiting resume" : goal.phase}`;
 				parts.push(goal.phase === "complete" ? theme.fg("success", label)
 					: goal.phase === "blocked" ? theme.fg("error", label)
 					: goal.phase === "paused" || !armed ? theme.fg("warning", label) : blue(label));
 			}
-			const sync = [remote.behind && `↓${remote.behind}`, remote.ahead && `↑${remote.ahead}`].filter(Boolean).join(" ");
-			if (sync) parts.push(theme.fg("muted", sync));
-			if (remote.mail) parts.push(blue(`✉${remote.mail}`));
-			if (disk.text) parts.push(theme.fg(disk.low ? "warning" : "dim", disk.text));
+			if (remote.received || remote.sent) {
+				const mail = `✉ ↓${remote.received} ↑${remote.sent}`;
+				parts.push(remote.open ? blue(mail) : theme.fg("muted", mail));
+			}
+			const shared = [remote.bytes && size(remote.bytes), remote.behind && `+${remote.behind}`, remote.ahead && `${remote.ahead} to push`].filter(Boolean);
+			if (shared.length) parts.push(theme.fg("muted", `remote: ${shared.join(" ")}`));
+			if (disk.text) parts.push(theme.fg(disk.low ? "warning" : "dim", `disk: ${disk.text}`));
 			if (integrityLabel) parts.push(theme.fg("warning", integrityLabel));
 			ui.setStatus("persistent-eclipse", parts.join(" · "));
 		}
-		if (ui && live.length && !ticker) ticker = setInterval(refresh, 160);
+		if (ui && live.length && !ticker) ticker = setInterval(refresh, ORBIT_MS);
 		if ((!ui || !live.length) && ticker) { clearInterval(ticker); ticker = undefined; }
 	}
 	function sync(ctx: ExtensionContext) {
@@ -571,6 +706,8 @@ Briefly check whether these experiments are still useful and whether an independ
 		if (next.length !== current.length || next.some((t, i) => t !== current[i])) pi.setActiveTools(next);
 		if (!on) ui?.setStatus("persistent-eclipse", undefined);
 		ui = on && ctx.mode === "tui" ? ctx.ui : undefined;
+		if (!ui) stopNews();
+		else if (!newsTimer && !news) scheduleNews(NEWS_FIRST);
 		if (lab) {
 			const root = labRoot(ctx.cwd)!;
 			slots = workerLimit(ctx.cwd);
@@ -581,7 +718,7 @@ Briefly check whether these experiments are still useful and whether an independ
 			tick.unref?.();
 		} else {
 			disk.lab = disk.text = "";
-			Object.assign(remote, { lab: "", name: "", branch: "", behind: 0, ahead: 0, mail: 0 });
+			Object.assign(remote, { lab: "", name: "", branch: "", behind: 0, ahead: 0, bytes: 0, received: 0, open: 0, sent: 0 });
 		}
 		refresh();
 	}
@@ -1054,6 +1191,7 @@ who writes the shared record.`;
 		await keepHistory(ctx, true);
 		jobs.clear();
 		if (tick) { clearInterval(tick); tick = undefined; }
+		stopNews();
 		ui?.setStatus("persistent-eclipse", undefined);
 		ui = undefined;
 		refresh();

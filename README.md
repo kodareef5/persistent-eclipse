@@ -1,3 +1,5 @@
+<img src="src/banner.svg" alt="Persistent Eclipse">
+
 Opinionated experimental research lab for Pi and DeepSeek Harness.  
 Long horizon, structured, creative, grounded discovery.  
 Zoom out. Keep trying. Inspired agent loops.  
