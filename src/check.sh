@@ -12,5 +12,6 @@ echo '-- cvss'; node src/test-cvss.mjs
 echo '-- lint'; node src/test-lint.mjs
 echo '-- pack'; node src/test-pack.mjs
 echo '-- history'; node --test src/test-history.mjs
+echo '-- integrity'; node --test src/test-integrity.mjs
 echo '-- retry'; node --test src/test-retry.mjs
 echo '-- dsh retry'; node src/test-retry-dsh.mjs "$dsh"

@@ -40,6 +40,22 @@ YAML used by DSH and Pi. No separate renderer is needed.
 - DSH loads `cordis.patch.yml` (`package.json` `dsh.bundle`).
 - Pi loads `extension.ts`, which reads `cordis.patch.yml` (`pi install <this repo>`).
 
+Pi checks its package at startup, hourly, and on `/pe-version`. It compares SHA-256
+hashes of `extension.ts`, `cordis.patch.yml`, `package.json`, and the imported history,
+retry, and integrity modules with their installed Git commit. It fetches the package's
+`origin/main` to distinguish an available update from local or divergent commits.
+Changed files, unavailable verification, and updates show a notification and a short
+footer notice. An installation updated while Pi is running requests a reload; it
+does not claim the already-loaded code has updated. `/pe-version` includes commit IDs
+and combined runtime fingerprints. The check never installs or repairs anything.
+
+This detects drift, not malicious tampering with the checker, local Git, or upstream.
+It does not verify dependencies, extracted skill caches, or tools copied into labs.
+A copied package without its own Git metadata is unverified; an unreachable remote
+leaves freshness unknown. Notifications do not block research or grant agents
+permission to edit the installation. Stronger authenticity would need a trusted
+verifier outside the plugin and signed releases or separately trusted hashes.
+
 Pi's `pe_web_search` returns raw search results: titles, URLs, and excerpts that the
 agent reads itself. It uses the operator's OpenRouter key and the web plugin with
 Parallel fast, falling back to Exa fast. `deepseek/deepseek-v4.1-flash-1017`, with

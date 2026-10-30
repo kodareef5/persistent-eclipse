@@ -8,6 +8,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { indexSession, captureSearch, scheduleReport } from "./src/history.mjs";
 import { installRetry } from "./src/retry-pi.ts";
+import { createIntegrityCheck } from "./src/integrity.mjs";
 import { Type, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, VERSION,
 	type AgentSession, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -59,7 +60,9 @@ const GOAL_POLICY = `create_goal may infer goal intent from a direct human reque
 
 type Skill = { name: string; description: string; filePath: string; baseDir: string };
 
-const yml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "cordis.patch.yml"), "utf8");
+const packageRoot = dirname(fileURLToPath(import.meta.url));
+const checkIntegrity = createIntegrityCheck(packageRoot);
+const yml = readFileSync(join(packageRoot, "cordis.patch.yml"), "utf8");
 const historyMeta = { runtimeVersion: VERSION, node: process.version, harnessVersion: JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8")).version,
 	harnessSha256: createHash("sha256").update(yml).digest("hex") };
 const lines = yml.split("\n");
@@ -312,6 +315,28 @@ export default function (pi: ExtensionAPI) {
 	let generation = 0;
 	let ui: ExtensionContext["ui"] | undefined;
 	let ticker: ReturnType<typeof setInterval> | undefined;
+	let integrityTimer: ReturnType<typeof setInterval> | undefined;
+	let integrityLabel = "", integrityNotice = "";
+	let integrityBusy: Promise<void> | undefined;
+	function inspectPlugin(ctx: ExtensionContext, explicit = false): Promise<void> {
+		if (integrityBusy) return integrityBusy.then(() => inspectPlugin(ctx, explicit));
+		const epoch = generation;
+		integrityBusy = (async () => {
+			const report = await checkIntegrity();
+			if (epoch !== generation) return;
+			integrityLabel = report.label;
+			if (explicit || report.summary !== integrityNotice)
+				ctx.ui.notify(explicit ? report.detail : report.summary, report.warning ? "warning" : "info");
+			integrityNotice = report.summary;
+			refresh();
+		})().catch(() => {
+			if (epoch !== generation) return;
+			integrityLabel = "plugin unverified";
+			ctx.ui.notify("Persistent Eclipse integrity check failed; version and runtime hashes are unverified.", "warning");
+			refresh();
+		}).finally(() => { integrityBusy = undefined; });
+		return integrityBusy;
+	}
 	let goal: Goal | null = null;
 	let armed = false; // Permission to continue is process-local and never restored.
 	let human = false; // The current turn carries a direct request from the operator.
@@ -532,6 +557,7 @@ Briefly check whether these experiments are still useful and whether an independ
 			if (sync) parts.push(theme.fg("muted", sync));
 			if (remote.mail) parts.push(blue(`✉${remote.mail}`));
 			if (disk.text) parts.push(theme.fg(disk.low ? "warning" : "dim", disk.text));
+			if (integrityLabel) parts.push(theme.fg("warning", integrityLabel));
 			ui.setStatus("persistent-eclipse", parts.join(" · "));
 		}
 		if (ui && live.length && !ticker) ticker = setInterval(refresh, 160);
@@ -976,7 +1002,13 @@ who writes the shared record.`;
 		},
 	});
 
-	pi.on("session_start", (_event, ctx) => { started = false; restoreGoal(ctx); keepHistory(ctx); reportInterrupted(ctx); });
+	pi.on("session_start", (_event, ctx) => {
+		started = false; restoreGoal(ctx); keepHistory(ctx); reportInterrupted(ctx);
+		void inspectPlugin(ctx);
+		if (integrityTimer) clearInterval(integrityTimer);
+		integrityTimer = setInterval(() => { void inspectPlugin(ctx); }, 60 * 60_000);
+		integrityTimer.unref?.();
+	});
 	pi.on("session_tree", (_event, ctx) => restoreGoal(ctx));
 	// Quitting or reloading Pi stops its workers. Leave each a note in its scratch, and tell
 	// the next session which tasks were cut off, so their partial work is picked up rather
@@ -1015,6 +1047,7 @@ who writes the shared record.`;
 		armed = false;
 		cancelIdleReview();
 		generation++; // Suppress late notices before the next session can start.
+		if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = undefined; }
 		markInterrupted(running(), (event as { reason?: string }).reason ?? "shutdown");
 		await Promise.all([...jobs.values()].map((j) => stop(j)));
 		await Promise.all([...jobs.values()].map((j) => j.work));
@@ -1125,6 +1158,11 @@ who writes the shared record.`;
 		}
 	});
 	pi.on("turn_start", () => cancelIdleReview());
+
+	pi.registerCommand("pe-version", {
+		description: "Check PE runtime hashes, local edits, upstream updates, and whether a reload is needed",
+		handler: async (_args, ctx) => { await inspectPlugin(ctx, true); },
+	});
 
 	pi.registerCommand("pe", {
 		description: "PE: make this directory a lab, or keep working the lab it is in",

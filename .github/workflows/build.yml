@@ -67,7 +67,7 @@ jobs:
       - name: Test
         run: |
           for t in cvss lint pack; do echo "-- $t"; node src/test-$t.mjs; done
-          for t in history retry; do echo "-- $t"; node --test src/test-$t.mjs; done
+          for t in history integrity retry; do echo "-- $t"; node --test src/test-$t.mjs; done
           echo "-- pi"; node src/test-pi.mjs pi
 
       - name: Commit the rebuilt files

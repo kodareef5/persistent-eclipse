@@ -241,6 +241,16 @@ try {
   check(JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8')).packages?.length === 1, 'pi install accepts the pushed files as a package')
 
   {
+    const s = goalSession(notLab);
+    try {
+      await s.rpc({type: 'prompt', message: '/pe-version'});
+      await until(() => notified(s, 'Loaded runtime SHA-256:'));
+      check(notified(s, 'runtime hashes unverified (no package Git baseline)'),
+        'version: command reports copied packages as unverified and exposes the runtime fingerprint');
+    } finally { await s.close(); }
+  }
+
+  {
     let manager = 0, worker = 0;
     const priorProbes = existsSync(hooks) ? readFileSync(hooks, 'utf8').split('\n').filter(x => x.includes('"event":"probe"')).length : 0;
     const retried = [];
