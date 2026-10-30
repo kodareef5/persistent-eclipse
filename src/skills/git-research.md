@@ -22,7 +22,7 @@ Read **all** of `.research/MISSION.md`, or the verbatim mission in your brief. I
 | `.research/FRONTIER.md` | Questions already explored, partial passes, and reasons to revisit |
 | `.research/LABELS.md` | Optional: the lab's shared label vocabulary |
 | `.research/notes/R-<id>.md` | Individual claims and their evidence |
-| `.research/reviews/` | Impact reviews across source revisions |
+| `.research/reviews/` | Impact reviews across source revisions, and layered challenges |
 | `.research/runs/REQ-<id>/` | Substantial experiments worth retaining, with inputs and results |
 | `.research/scratch/T-<id>/` | A researcher's code, experiments, and artifacts |
 | `.research/vendor/` | Published dependency source retained as evidence |
@@ -122,7 +122,7 @@ POST /account may reach the update handler without a valid session.
 | `targets` | Paths, symbols, lines, or artifacts that a reader can actually open |
 | `links` | Directed relationships to other R-IDs; see §5 |
 | `checked_at` | The revision or archived artifact **actually checked** |
-| `imported_from` | Only on a claim a lab pack carried in: `<lab>:R-<n> sha256:<pack sha256>` |
+| `imported_from` | Only on a claim a lab pack carried in: `<lab>:<R-id> sha256:<pack sha256>` |
 | `reported_state` | Only with `imported_from`: the state the other lab reported; `state` is this lab's own |
 
 An *observation* records a seen condition; a *hypothesis* offers a testable explanation; a *finding* states a conclusion supported by evidence; a *negation* records counterevidence to another conclusion; a *question* preserves an unresolved line of inquiry. The `state` describes the standing of that particular claim, not its importance. `refuted` and `superseded` are records to retain, not files to delete.
@@ -461,7 +461,7 @@ git commit -m 'R-43: refute R-31 at 1a2b3c4' -- .research/notes/R-43.md .researc
 
 If a permitted source pin moved, include that specific gitlink path **and its impact review**. Other changes may already be staged, including `.gitmodules` and submodule metadata. Leave unrelated paths alone; if unfamiliar staged changes remain, tell the operator.
 
-Commit worker artifacts only after completion and review. **Subagents never stage, commit, merge, or push.** The manager can add relevant sources as part of the research. Keep pinned study checkouts stable and use scratch for changes. Pushing and external submission follow the operator's destination and authorization; local research permission does not imply publication.
+Commit worker artifacts only after completion and review. **Subagents never stage, commit, merge, or push.** The manager can add relevant sources as part of the research. Keep pinned study checkouts stable and use scratch for changes. Pulling and pushing the lab's own private remote is routine; see `pe-sync`. Any other push, and any external submission, follows the operator's destination and authorization; local research permission does not imply publication.
 
 ## 9. Keep the exploration frontier
 

@@ -1,39 +1,68 @@
 # Mission: Math Team
 Mode: math-team
 
-Investigate mathematical claims as persistently as a code research lab investigates
-invariants. Seek useful improvements, stronger or sharper results, weaker sufficient
-hypotheses, missing cases, counterexamples, and precise negations. A failed proof,
-an unproved lemma, or a Lean build failure alone does not refute a theorem. A proved
-special case does not establish the full statement. Novelty needs a literature
-check, not a model's assurance.
+Go looking. We have a chance to spend more attempts on a question than a person
+usually can. Try the odd representation, the missing case, the connection to a
+subject that seems unrelated. Look where things shouldn't be; sometimes you don't
+know what you'll find until you try.
 
-Load pe-math. Pin manuscripts, revisions, proof repositories, and dependencies;
-organize their claims and assumptions in MAP, notes, and the dependency graph. Work
-from primary papers and artifacts, including current AI-generated research when
-relevant. Treat natural-language arguments and formalizations as claims to examine.
-Use the configured model for exploration; this mission requires no special math API
-or unreleased model. Use Lean where it settles a precise obligation, and keep useful
-informal work and counterexamples even when formalization is not yet available.
+Use that time to explore, not just repeat the same argument. Read another paper,
+change a hypothesis, work a tiny example, write a search, or ask a fresh researcher
+to start from the statement without your proof. Let one partial result suggest
+another experiment. Keep useful observations and failed approaches so the next
+attempt starts somewhere new.
 
-For each result, separate the intended statement, the formal statement, the proof or
-counterexample, and what was actually checked. Examine quantifiers, domains,
-definitions, nonvacuity, hypotheses, edge cases, and dependency assumptions. A proof
-of a mistranslated or weakened statement does not settle the intended mathematics.
-Record imported axioms and proof holes, including transitive ones. Independent
-review must check both the argument and the statement it proves.
+Seek proofs, sharper bounds, weaker assumptions, counterexamples, and connections.
+A result can be useful before it becomes a headline. If a route seems impossible,
+read the obstruction itself: what does it assume, and does it cover this question?
+Revisit a dismissal when a new idea gives you a reason. A failed approach tells us
+about that approach; it needn't be the end of the problem.
 
-Keep durable findings and negations in `.research/notes/`, dated literature evidence
-in `.research/intel/`, and reproducible Lean projects, scripts, exact toolchain and
-dependency pins under `.research/lean/<R-id>/`. Every researcher can run checks;
-coordinate heavy work through the shared compute checkout. Retain runnable steps,
-outputs, and limits with the result, using `.research/runs/REQ-<id>/` for substantial runs.
-Report status precisely: conjectured, informally argued, computationally tested, or
-kernel-checked for a named statement and axiom basis. Never present a numerical
-search as proof of a universal claim or a conditional result as unconditional.
+## Exploring
 
-The reporter receives this entire mission and prepares a standalone research note
-under `.research/reports/` with these sections:
+Load pe-math for questions and examples to try. Pin manuscripts, revisions, proof
+repositories, and dependencies. Use primary papers, including AI-assisted research
+where relevant, and map the statements and assumptions you are building on.
+The model you have can explore; no special math API or unreleased model is required.
+
+Mix methods freely: paper arguments, exact computations, toy models, counterexample
+searches, and Lean when it helps settle a precise question. Give researchers different
+starting points, and bring their useful pieces back together. Keep enough of an
+idea's context to tell whether it transfers to another problem.
+
+Persist within the operator's scope and budget. A fresh attempt should bring a new
+question, representation, source, or check. Keep the ambition; let the evidence decide
+what you can claim.
+
+## Checking what we found
+
+Separate the intended statement, the formal statement, the argument or counterexample,
+and what was actually checked. Watch quantifiers, domains, definitions, nonvacuity,
+parameter dependencies, and hypotheses. A proof of a weaker or mistranslated statement
+doesn't settle the original question.
+
+A failed proof or Lean build doesn't refute a theorem. A proved special case or a
+bounded numerical search doesn't prove the universal statement. A conditional
+result keeps its conditions. Check the literature before calling something new.
+
+Have an independent reader check both the reasoning and the statement it establishes.
+For formal work, record imported axioms and proof holes, including those in dependencies.
+Keep useful informal arguments even when formalization is still out of reach.
+
+## Keeping and sharing the work
+
+Save findings and negations in `.research/notes/`, literature in `.research/intel/`,
+and reproducible proof projects and scripts in `.research/lean/<R-id>/`. Keep exact
+toolchain and dependency pins, commands, outputs, and remaining gaps. Substantial
+experiments can live in `.research/runs/REQ-<id>/`. Anyone can run small checks;
+coordinate heavy work through the shared compute checkout.
+
+Say what kind of result it is: conjectured, informally argued, computationally tested,
+or kernel-checked for a named statement and axiom basis. Credit prior and AI-assisted
+work, and distinguish a reproduction from a new result.
+
+Give the reporter this whole mission and the evidence. A standalone research note
+in `.research/reports/` can use:
 
     Title: [Exact improvement, result, or counterexample]
     ## Statement and assumptions
@@ -44,7 +73,6 @@ under `.research/reports/` with these sections:
     ## Limitations and open obligations
     ## References
 
-Cite the exact revision and theorem identifiers, credit prior and AI-assisted work,
-and distinguish new results from reproductions. Include checked Lean artifacts when
-available; otherwise state the remaining obligations. Preparation is local; publishing,
+Cite exact revisions and theorem identifiers. Include checked Lean artifacts when
+available and say what remains open. Preparing the note is local; publishing,
 submitting a paper, or contacting authors is a separate operator action.

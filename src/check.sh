@@ -11,3 +11,6 @@ echo '-- pi'; node src/test-pi.mjs "${2:-pi}"
 echo '-- cvss'; node src/test-cvss.mjs
 echo '-- lint'; node src/test-lint.mjs
 echo '-- pack'; node src/test-pack.mjs
+echo '-- history'; node --test src/test-history.mjs
+echo '-- retry'; node --test src/test-retry.mjs
+echo '-- dsh retry'; node src/test-retry-dsh.mjs "$dsh"

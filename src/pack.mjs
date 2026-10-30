@@ -18,9 +18,9 @@ import zlib from "node:zlib";
 export const FORMAT = "pe-lab-pack/1";
 const PLAN_FORMAT = "pe-lab-pack-plan/1";
 // Exclude runtime output, not authored helpers or another import's provenance.
-const SKIP_ROOT = new Set(["scratch", "exports"]);
+const SKIP_ROOT = new Set(["scratch", "exports", "local"]);
 const SKIP = new Set([".lake", ".git", ".DS_Store"]);
-const SHIPPED = /^tools\/(?:lint-notes|cvss|pack)\.mjs(?:\.shipped)?$/;
+const SHIPPED = /^tools\/(?:lint-notes|cvss|pack|history)\.mjs(?:\.shipped)?$/;
 // Suggestions only: size and extension cannot tell us whether bytes are replaceable.
 const BINARY = /\.(pdf|png|jpe?g|gif|webp|svg|zip|gz|tgz|tar|bz2|xz|7z|bin|so|dylib|dll|exe|wasm|mp4|mov|olean)$/i;
 const LARGE = 1024 * 1024;

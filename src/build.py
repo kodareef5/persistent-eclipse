@@ -3,13 +3,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 S = ROOT / 'src' / 'skills'
 research = (ROOT / 'src' / 'research.md').read_text().strip()
 persona = (ROOT / 'src' / 'persona.md').read_text().rstrip('\n').replace('{{pe_research}}', research)
-LAB = ['git-research','survey','reader','muse','coderunner','migrator','challenger','intel','cvss','lint','dead-end','reporter','fleet','patch','math','web','export']
+LAB = ['git-research','survey','reader','muse','coderunner','migrator','challenger','intel','cvss','lint','dead-end','reporter','fleet','patch','math','web','export','sync','layered-challenge','history','models','model-notes']
 MISSIONS = ['blue-team', 'red-team', 'math-team']
 mission = {m: (ROOT / 'src' / 'missions' / (m + '.md')).read_text().rstrip('\n') + '\n' for m in MISSIONS}
 
 code = (ROOT / 'src' / 'cvss.mjs').read_text().rstrip() + '\n'
 lint = (ROOT / 'src' / 'lint-notes.mjs').read_text().rstrip() + '\n'
 pack = (ROOT / 'src' / 'pack.mjs').read_text().rstrip() + '\n'
+history = (ROOT / 'src' / 'history.mjs').read_text().rstrip() + '\n'
 # A skill's tables live in src/skills/<name>/, one Markdown file each, and fill its
 # {{table:<file>}} slots. Every slot needs a file and every file a slot.
 TABLE = re.compile(r'\{\{table:([a-z0-9][a-z0-9.-]*)\}\}')
@@ -31,7 +32,8 @@ def skill(name):
         text = text.replace('{{mission:' + m + '}}', mission[m])
     return (text.replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', hashlib.sha256(code.encode()).hexdigest())
                 .replace('{{lint.mjs}}', lint).replace('{{lint.sha256}}', hashlib.sha256(lint.encode()).hexdigest())
-                .replace('{{pack.mjs}}', pack).replace('{{pack.sha256}}', hashlib.sha256(pack.encode()).hexdigest()))
+                .replace('{{pack.mjs}}', pack).replace('{{pack.sha256}}', hashlib.sha256(pack.encode()).hexdigest())
+                .replace('{{history.mjs}}', history).replace('{{history.sha256}}', hashlib.sha256(history.encode()).hexdigest()))
 
 def block(text, indent):
     pad = ' ' * indent
@@ -76,6 +78,8 @@ w('        customSkillDirs: !!js |')
 prov = r'''(() => {
   const fs = process.getBuiltinModule('node:fs'), path = process.getBuiltinModule('node:path')
   const lib = () => [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
+  HISTORY_HOOK
+  RETRY_HOOK
   const inLab = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return true; if (d === path.dirname(d)) return false } }
   const meta = (name, s) => ({ name, description: s.description, invocation: { modelInvocable: true, userInvocable: true }, provider: 'persistent-eclipse', source: 'runtime', rank: 450, locator: name })
   skills.registerProvider(() => ({
@@ -88,7 +92,8 @@ prov = r'''(() => {
   }))
   return []
 })()'''
-w(block(prov, 14))
+w(block(prov.replace('HISTORY_HOOK', (ROOT / 'src' / 'history-dsh.js').read_text())
+            .replace('RETRY_HOOK', (ROOT / 'src' / 'retry-dsh.js').read_text()), 14))
 def preset(preset_id, name, description, order):
     w(f'    - id: preset-{preset_id}')
     w("      name: '@deepseek-ai/dsh-agent-preset'")
@@ -151,8 +156,8 @@ def preset(preset_id, name, description, order):
       const lab = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return d; if (d === path.dirname(d)) return undefined } }
       const tools = () => {
         const skillset = [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
-        const pick = (skill, tool) => new RegExp('```js ' + tool + '\\n([\\s\\S]*?)```').exec(skillset[skill]?.content ?? '')?.[1]
-        return [['lint-notes.mjs', pick('pe-lint', 'lint-notes.mjs')], ['cvss.mjs', pick('pe-cvss', 'cvss.mjs')], ['pack.mjs', pick('pe-export', 'pack.mjs')]]
+        const pick = (skill, tool) => new RegExp('```js ' + tool + '\\n([\\s\\S]*?)^```', 'm').exec(skillset[skill]?.content ?? '')?.[1]
+        return [['lint-notes.mjs', pick('pe-lint', 'lint-notes.mjs')], ['cvss.mjs', pick('pe-cvss', 'cvss.mjs')], ['pack.mjs', pick('pe-export', 'pack.mjs')], ['history.mjs', pick('pe-history', 'history.mjs')]]
       }
       const sha = text => crypto.createHash('sha256').update(text).digest('hex')
       let shipped

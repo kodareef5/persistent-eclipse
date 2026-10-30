@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { reportData } from './history.mjs'
 
 const pi = process.argv[2] || 'pi'
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -21,6 +22,9 @@ const pkg = join(scratch, 'package'), home = join(scratch, 'home'), lab = join(s
 // The package holds what Git would push: tracked files and new files that are not ignored.
 const shipped = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { cwd: repo, encoding: 'utf8' }).split('\n').filter(Boolean)
 for (const file of shipped) { mkdirSync(dirname(join(pkg, file)), { recursive: true }); cpSync(join(repo, file), join(pkg, file)) }
+// Exercise the shipped retry hooks with short waits in this isolated installation.
+const retrySource = join(pkg, 'src', 'retry.mjs');
+writeFileSync(retrySource, readFileSync(retrySource, 'utf8').replace('initialDelayMs: 30_000', 'initialDelayMs: 100'));
 for (const dir of [home, join(lab, '.research'), notLab]) mkdirSync(dir, { recursive: true })
 writeFileSync(join(lab, '.research', 'LAB.md'), '# lab\n')
 const hooks = join(scratch, 'worker-hooks.jsonl')
@@ -30,11 +34,11 @@ import { appendFileSync } from 'node:fs';
 import { Type } from '@earendil-works/pi-ai';
 export default function(pi) {
   pi.registerTool({name: 'fixture_probe', label: 'Fixture helper', description: 'An installed research helper.',
-    parameters: Type.Object({}), async execute() { return {content: [{type: 'text', text: 'Installed helper ran.'}], details: {}}; }});
+    parameters: Type.Object({}), async execute() { appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event: 'probe'}) + '\\n'); return {content: [{type: 'text', text: 'Installed helper ran.'}], details: {}}; }});
   const realFetch = globalThis.fetch;
   globalThis.fetch = (url, options) => String(url) === 'https://openrouter.ai/api/v1/chat/completions'
-    ? Promise.resolve(new Response(JSON.stringify({choices: [{message: {content: 'Fixture search answer.',
-      annotations: [{url_citation: {title: 'Primary source', url: 'https://example.test/paper'}}]}}]}), {status: 200}))
+    ? (appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event: 'search', maxTokens: JSON.parse(options.body).max_tokens}) + '\\n'), Promise.resolve(new Response(JSON.stringify({choices: [{message: {content: 'Fixture search answer.',
+      annotations: [{url_citation: {title: 'Primary source', url: 'https://example.test/paper'}}]}}]}), {status: 200})))
     : realFetch(url, options);
   const worker = ctx => ctx.getSystemPrompt().match(/# Persistent Eclipse worker (T-\\d+)/)?.[1];
   for (const event of ['session_start', 'session_shutdown']) pi.on(event, (_event, ctx) => {
@@ -63,7 +67,7 @@ const server = createServer((req, res) => {
     const response = await answer(request)
     if (res.destroyed) return
     if (response.error) {
-      res.writeHead(400, {'content-type': 'application/json'})
+      res.writeHead(response.status ?? 400, {'content-type': 'application/json'})
       res.end(JSON.stringify({error: {message: response.error}}))
       return
     }
@@ -72,13 +76,21 @@ const server = createServer((req, res) => {
     const tools = typeof response === 'string' ? [] : response.tools ?? []
     res.end(chunk({ delta: { role: 'assistant', content: typeof response === 'string' ? response : response.text ?? '',
       ...(tools.length ? { tool_calls: tools.map(([name, args], index) => ({ index, id: `call_${requests.length}_${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) } : {}) } }) +
-      chunk({ delta: {}, finish_reason: tools.length ? 'tool_calls' : 'stop' }) + 'data: [DONE]\n\n')
+      chunk({ delta: {}, finish_reason: tools.length ? 'tool_calls' : 'stop' }) +
+      (response.usage ? `data: ${JSON.stringify({choices: [], usage: response.usage})}\n\n` : '') + 'data: [DONE]\n\n')
   })
 })
 await new Promise(r => server.listen(0, '127.0.0.1', r))
 writeFileSync(join(home, 'models.json'), JSON.stringify({ providers: { probe: {
   baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'probe',
-  models: [{ id: 'probe', contextWindow: 200000, maxTokens: 4096 }] } } }))
+  models: [{ id: 'probe', contextWindow: 200000, maxTokens: 4096 },
+    {id: 'reasoner', reasoning: true, contextWindow: 200000, maxTokens: 4096}] },
+  alternate: {baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'alternate-fixture',
+    models: [{id: 'scout', reasoning: false, contextWindow: 32000, maxTokens: 4096},
+      {id: 'reviewer', reasoning: true, contextWindow: 32000, maxTokens: 4096}]},
+  unavailable: {baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
+    models: [{id: 'locked', contextWindow: 32000, maxTokens: 4096}]}
+} }))
 const env = { ...process.env, OPENROUTER_API_KEY: '', PI_CODING_AGENT_DIR: home, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' }
 
 const run = (args, cwd) => new Promise((resolve, reject) => {
@@ -101,7 +113,7 @@ function parse(request) {
     tools: (request.tools ?? []).map(t => t.function.name) }
 }
 
-const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_interrupt_agent', 'pe_web_search'].sort()
+const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_interrupt_agent', 'pe_list_models', 'pe_web_search'].sort()
 const goalTools = ['create_goal', 'get_goal', 'update_goal']
 // The goal a scripted model last read with get_goal, so it can name the exact revision.
 const lastGoal = request => {
@@ -188,6 +200,7 @@ const body = text => text.replace(/^---\n[\s\S]*?\n---\n/, '').trim()
 const code = readFileSync(join(src, 'cvss.mjs'), 'utf8').trimEnd() + '\n'
 const lint = readFileSync(join(src, 'lint-notes.mjs'), 'utf8').trimEnd() + '\n'
 const packer = readFileSync(join(src, 'pack.mjs'), 'utf8').trimEnd() + '\n'
+const history = readFileSync(join(src, 'history.mjs'), 'utf8').trimEnd() + '\n'
 const research = readFileSync(join(src, 'research.md'), 'utf8').trim()
 const missionText = Object.fromEntries(['red-team', 'blue-team', 'math-team'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8').trimEnd() + '\n']))
 const expand = text => Object.entries(missionText).reduce((t, [mode, m]) => t.replace(`{{mission:${mode}}}`, m), text)
@@ -195,6 +208,7 @@ const expand = text => Object.entries(missionText).reduce((t, [mode, m]) => t.re
   .replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', createHash('sha256').update(code).digest('hex'))
   .replace('{{lint.mjs}}', lint).replace('{{lint.sha256}}', createHash('sha256').update(lint).digest('hex'))
   .replace('{{pack.mjs}}', packer).replace('{{pack.sha256}}', createHash('sha256').update(packer).digest('hex'))
+  .replace('{{history.mjs}}', () => history).replace('{{history.sha256}}', createHash('sha256').update(history).digest('hex'))
 // A skill's {{table:<file>}} slots take src/skills/<name>/<file>.md, trimmed.
 const tables = (name, text) => text.replace(/\{\{table:([a-z0-9][a-z0-9.-]*)\}\}/g, (_, t) => readFileSync(join(src, 'skills', name, t + '.md'), 'utf8').trim())
 const want = Object.fromEntries(readdirSync(join(src, 'skills')).filter(f => f.endsWith('.md')).map(f => {
@@ -217,10 +231,51 @@ try {
   await run(['install', pkg], scratch)
   check(JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8')).packages?.length === 1, 'pi install accepts the pushed files as a package')
 
+  {
+    let manager = 0, worker = 0;
+    const priorProbes = existsSync(hooks) ? readFileSync(hooks, 'utf8').split('\n').filter(x => x.includes('"event":"probe"')).length : 0;
+    const retried = [];
+    answer = async request => {
+      retried.push(request);
+      if (workerId(request)) {
+        switch (worker++) {
+          case 0: return tool('fixture_probe', {});
+          case 1: return {status: 402, error: 'Insufficient credits'};
+          case 2: return {error: 'Upstream implementation broke'};
+          default: return 'Worker continued its original task.';
+        }
+      }
+      if (manager++ === 0) return tool('pe_subagent', {taskId: 'T-880', task: 'Use fixture_probe once, then finish.'});
+      if (manager === 2) return {status: 401, error: 'Provider temporarily rejected credentials'};
+      return 'Manager continued its original task.';
+    };
+    await ask(lab, 'Keep working through provider failures.');
+    const probes = readFileSync(hooks, 'utf8').split('\n').filter(x => x.includes('"event":"probe"')).length - priorProbes;
+    check(worker === 4 && manager >= 3 && probes === 1 && existsSync(join(lab, '.research/scratch/T-880/.done')),
+      'retry: manager and worker recover from credits, auth, and arbitrary provider errors without replaying a tool');
+    check(retried.filter(workerId).slice(2).every(r => toolResults(r).includes('Installed helper ran.')),
+      'retry: worker keeps its successful tool results and original conversation');
+    check(retried.filter(r => !workerId(r)).some(r => { const text = JSON.stringify(r.messages); return text.includes('PE worker T-880 is waiting on its provider') && text.includes('Insufficient credits'); }),
+      'retry: the manager hears once, with the provider error, when a worker starts waiting');
+
+    const s = goalSession(lab);
+    try {
+      answer = async () => ({status: 402, error: 'Still out of credit'});
+      await s.rpc({type: 'prompt', message: 'Wait for funding.'});
+      await until(() => s.events.some(e => e.type === 'entry_appended' && e.entry?.customType === 'pe-retry'));
+      const settled = s.settled();
+      await s.rpc({type: 'abort'}); await s.waitSettled(settled);
+      const calls = requests.length;
+      await new Promise(r => setTimeout(r, 350));
+      check(requests.length === calls, 'retry: cancelling during backoff settles promptly and never wakes the session again');
+    } finally { await s.close(); }
+    answer = async () => 'ok';
+  }
+
   const inside = await ask(lab, 'hello')
   check(inside.system.includes(persona), 'lab: the persona is in the system prompt')
   check(inside.system.includes('## In Pi'), 'lab: the Pi note is in the system prompt')
-  check(JSON.stringify(inside.tools.filter(t => t.startsWith('pe_')).sort()) === JSON.stringify(peTools), 'lab: the four PE worker tools and web search are active')
+  check(JSON.stringify(inside.tools.filter(t => t.startsWith('pe_')).sort()) === JSON.stringify(peTools), 'lab: PE worker tools, model discovery, and web search are active')
   check(goalTools.every(t => inside.tools.includes(t)) && inside.system.includes('Mark blocked only after the same blocking condition persists for at least 3'),
     'lab: the DSH goal tools and goal policy are present')
   const skills = listed(inside.system).filter(s => s.name.startsWith('pe-'))
@@ -234,13 +289,31 @@ try {
   }
   ok('lab: every skill file matches src/skills')
 
+  check(!existsSync(join(lab, '.research/local/sessions')), 'history: --no-session does not retain the manager conversation')
+  {
+    const historyLab = join(scratch, 'history-lab')
+    mkdirSync(join(historyLab, '.research'), {recursive: true})
+    writeFileSync(join(historyLab, '.research/LAB.md'), '# lab\n')
+    await run(['-p', '--provider', 'probe', '--model', 'probe', 'Keep a session receipt.'], historyLab)
+    const data = reportData(historyLab)
+    check(data.usage.sessions.length === 1 && data.usage.calls === 1 && existsSync(join(historyLab, '.research/local/ACTIVITY.md')) &&
+      !existsSync(join(historyLab, '.research/local/sessions')) && existsSync(join(historyLab, '.research/local/index')),
+      'history: Pi indexes its native manager transcript and finishes its background shutdown report without a duplicate copy')
+    check(data.usage.unmetered === 1, 'history: a provider without usage is shown as unmetered')
+    check(data.collective.labs.some(row => row.local && row.calls === 1) && existsSync(join(historyLab, '.research/activity')),
+      'history: new manager work has a stable origin and shareable usage receipts')
+    writeFileSync(join(historyLab, '.research/LAB.md'), '# lab\nHistory: off\n')
+    await run(['-p', '--provider', 'probe', '--model', 'probe', 'Leave this session out.'], historyLab)
+    check(reportData(historyLab).usage.sessions.length === 1, 'history: History off stops automatic capture')
+  }
+
   // The lab tools must land as the bytes the skill tells the agent to hash. Pi copies
   // them out of the same skill text DSH does, so this is the second runtime of one rule.
   const placedTool = (name, src) => {
     const file = join(lab, '.research', 'tools', name)
     return readFileSync(file, 'utf8') === readFileSync(join(repo, 'src', src), 'utf8')
   }
-  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && !existsSync(join(notLab, '.research', 'tools')),
+  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && placedTool('history.mjs', 'history.mjs') && !existsSync(join(notLab, '.research', 'tools')),
     'lab: the linter, calculator, and packer are placed in the lab, and nowhere else')
 
   // With no OpenRouter key, search fails with a request to the operator, not silence.
@@ -345,10 +418,93 @@ try {
     answer = async () => 'ok'
   }
   rmSync(join(lab, '.research', 'MISSION.md')) // The remaining tests also cover labs with no recorded mission.
+  check(reportData(lab).usage.sessions.filter(s => s.role === 'worker').length >= 3,
+    'history: real worker conversations are indexed for reporting and later collection')
 
   writeFileSync(join(lab, '.research', 'SCOPE.md'), '# Scope\nLocal fixture only.\n')
   writeFileSync(join(lab, 'source.txt'), 'fixture evidence\n')
   const scratchFile = (id, name) => join(lab, '.research', 'scratch', id, name)
+
+  // Exercise model choice through real tools, worker requests, and saved usage.
+  {
+    const modelLab = join(scratch, 'model-lab')
+    const before = requests.length
+    const settingsFile = join(home, 'settings.json')
+    writeFileSync(settingsFile, JSON.stringify({...JSON.parse(readFileSync(settingsFile, 'utf8')),
+      modelThinkingLevels: {'alternate/reviewer': 'medium'}}))
+    mkdirSync(join(modelLab, '.research'), {recursive: true})
+    writeFileSync(join(modelLab, '.research/LAB.md'), '# Models\n')
+    const workerRequests = []
+    let step = 0
+    answer = async request => {
+      if (workerId(request)) {
+        workerRequests.push(request)
+        return {text: 'Checked the fixture.', usage: {prompt_tokens: 20, completion_tokens: 5, total_tokens: 25}}
+      }
+      const last = request.messages.filter(m => m.role === 'tool').at(-1)?.content ?? ''
+      switch (step++) {
+        case 0: return tool('pe_list_models', {})
+        case 1: {
+          const choices = JSON.parse(last)
+          check(choices.current.model === 'reasoner' && choices.current.effort === 'high' &&
+            choices.providers.some(p => p.provider === 'alternate') && !choices.providers.some(p => p.provider === 'unavailable'),
+            'models: discovery starts with configured providers and the current model/effort')
+          return tool('pe_list_models', {provider: 'alternate'})
+        }
+        case 2: {
+          const choices = JSON.parse(last)
+          check(choices.models.length === 2 && choices.models.find(m => m.model === 'scout')?.efforts.join() === 'off' && choices.nextOffset === null,
+            'models: provider discovery gives exact IDs and supported efforts')
+          return tool('pe_list_models', {provider: 'unavailable', model: 'locked'})
+        }
+        case 3:
+          check(JSON.parse(last).model.configuredAccess === false, 'models: an exact lookup can explain missing configured access')
+          return tool('pe_subagent', {taskId: 'T-1', task: 'No partial model choice.', model: 'scout'})
+        case 4:
+          check(last.includes('Supply provider and model together'), 'models: incomplete choices fail before launch')
+          return tool('pe_subagent', {taskId: 'T-1', task: 'No made-up model.', provider: 'alternate', model: 'missing'})
+        case 5:
+          check(last.includes('Unknown model'), 'models: unknown choices are not silently replaced')
+          return tool('pe_subagent', {taskId: 'T-1', task: 'No unsupported effort.', provider: 'alternate', model: 'scout', reasoning_effort: 'high'})
+        case 6:
+          check(last.includes('Unsupported effort') && last.includes('off'), 'models: unsupported effort returns the actual alternatives')
+          return tool('pe_subagent', {taskId: 'T-1', task: 'No missing credentials.', provider: 'unavailable', model: 'locked'})
+        case 7:
+          check(last.includes('No configured access') && !existsSync(join(modelLab, '.research/scratch/T-1')),
+            'models: unavailable choices consume neither a worker slot nor a task folder')
+          return {tools: [
+            ['pe_subagent', {taskId: 'T-1', task: 'Inherit my model and effort.'}],
+            ['pe_subagent', {taskId: 'T-2', task: 'Try a different provider and its default effort.', provider: 'alternate', model: 'scout'}],
+            ['pe_subagent', {taskId: 'T-3', task: 'Use my model with less effort.', reasoning_effort: 'low'}],
+            ['pe_subagent', {taskId: 'T-4', task: 'Use the selected model’s configured effort.', provider: 'alternate', model: 'reviewer'}]
+          ]}
+        case 8: return tool('pe_list_agents', {})
+        case 9:
+          check(last.includes('T-2  pe-git-research  alternate/scout') && last.includes('probe/reasoner'),
+            'models: fleet status names worker models and efforts')
+          return 'Results received.'
+        default: return 'Results received.'
+      }
+    }
+    await run(['-p', '--no-session', '--provider', 'probe', '--model', 'reasoner', '--thinking', 'high', 'Try these worker choices. PRIVATE_REVIEW_CONTEXT'], modelLab)
+    check(workerRequests.length === 4 && workerRequests.find(r => workerId(r) === 'T-1')?.model === 'reasoner' &&
+      workerRequests.find(r => workerId(r) === 'T-1')?.reasoning_effort === 'high' &&
+      workerRequests.find(r => workerId(r) === 'T-2')?.model === 'scout' &&
+      workerRequests.find(r => workerId(r) === 'T-3')?.reasoning_effort === 'low' &&
+      requests.slice(before).filter(r => !workerId(r)).every(r => r.model === 'reasoner' && r.reasoning_effort === 'high'),
+      'models: workers inherit, switch provider/model, or vary effort without changing the parent')
+    check(workerRequests.find(r => workerId(r) === 'T-4')?.reasoning_effort === 'medium',
+      'models: a changed model uses its own configured effort instead of inheriting the parent effort')
+    check(workerRequests.every(r => !JSON.stringify(r.messages).includes('PRIVATE_REVIEW_CONTEXT')),
+      'models: mixed workers get fresh briefs without the parent conversation')
+    const data = reportData(modelLab)
+    check(data.usage.rows.some(r => r.provider === 'alternate' && r.model === 'scout' && r.effort === 'off' && r.sums.total === 25) &&
+      data.usage.rows.some(r => r.model === 'reasoner' && r.effort === 'high' && r.sums.total === 25) &&
+      data.usage.rows.some(r => r.model === 'reasoner' && r.effort === 'low' && r.sums.total === 25) &&
+      data.usage.rows.some(r => r.model === 'reviewer' && r.effort === 'medium' && r.sums.total === 25),
+      'models: history accounts for the actual model and effort of each worker')
+    answer = async () => 'ok'
+  }
 
   // Goals follow DSH: durable phases on the branch, process-local arming, rounds that
   // continue the same session, operator-only creation and resumption, and a blocked
@@ -438,10 +594,16 @@ try {
       await s.waitSettled(count); release.resolve()
       check(requests.length === before + 1 && (await s.snapshot()).phase === 'paused', 'goals: pause stops the round under way and any follow-up')
       stage = 0
-      answer = async request => stage++ === 0 ? tool('get_goal', {}) : stage === 2 ? updateGoal(request, 'resume') : 'Only the operator can resume it.'
+      answer = async request => { switch (stage++) {
+        case 0: return tool('get_goal', {})
+        case 1: return updateGoal(request, 'resume')
+        case 2: return 'Resumed.'
+        case 3: return updateGoal(request, 'complete')
+        default: return 'Done.'
+      } }
       await s.prompt('Resume the goal.')
-      check((await s.snapshot()).phase === 'paused' && results(requests.at(-1)).includes('resumed by the operator with /goal resume'),
-        'goals: the model cannot resume a paused goal')
+      check((await s.snapshot()).phase === 'complete' && stage >= 4,
+        'goals: asked directly, the model resumes a paused goal and its rounds go on')
       await s.rpc({type: 'prompt', message: '/goal clear'})
 
       const clearReady = deferred(), clearRelease = deferred(); held.push(clearRelease)
@@ -452,13 +614,28 @@ try {
       clearRelease.resolve(); await s.waitSettled(count)
       check(requests.length === before + 1 && (await s.snapshot()) === null, 'goals: clear writes a tombstone and prevents an in-flight round from continuing')
 
+      let recovery = 0;
+      answer = async request => {
+        if (recovery++ < 2) return {status: 402, error: 'Waiting for credit'};
+        if (recovery === 3) return tool('get_goal', {});
+        if (recovery === 4) return updateGoal(request, 'complete');
+        return 'Recovered goal finished.';
+      };
+      await s.prompt('/goal Finish after funding returns.');
+      state = await s.snapshot();
+      check(state.phase === 'complete' && state.roundsStarted === 1,
+        'retry: provider failures preserve an armed goal without spending extra goal rounds');
+      await s.rpc({type: 'prompt', message: '/goal clear'});
+
       answer = async () => ({error: 'Fixture model failure.'})
+      writeFileSync(join(lab, '.research', 'LAB.md'), '# lab\nRetry: off (operator)\n')
       before = requests.length
       await s.prompt('/goal Investigate a provider failure.')
       state = await s.snapshot()
       check(requests.length === before + 1 && state.phase === 'active' && parse(requests.at(-1)).system !== undefined &&
         notified(s, 'active, disarmed'), 'goals: a model error disarms the goal instead of retrying rounds')
       await s.rpc({type: 'prompt', message: '/goal clear'})
+      writeFileSync(join(lab, '.research', 'LAB.md'), '# lab\n')
 
       const abortReady = deferred(), abortRelease = deferred(); held.push(abortRelease)
       answer = async () => { abortReady.resolve(); await abortRelease.promise; return 'Cancelled response.' }
@@ -747,6 +924,9 @@ try {
     'workers: a general researcher writes and executes code, uses an installed helper, and searches the web')
   check(receiptName && JSON.parse(readFileSync(scratchFile('T-7', receiptName), 'utf8')).sources[0].url === 'https://example.test/paper' &&
     !existsSync(join(lab, '.research', 'intel')), 'workers: search receipts stay with their artifacts for manager review')
+  const searches = readFileSync(hooks, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.event === 'search')
+  check(searches.length > 0 && searches.every(e => e.maxTokens === 4096),
+    'search: requests cap their answer, so a low-balance key is not refused for a 65k reservation', JSON.stringify(searches))
 
   // Skills are optional lenses, including those previously reserved for the manager.
   for (const [taskId, skill, heading] of [['T-8', 'pe-coderunner', '# Code Runner'], ['T-9', 'pe-dead-end', '# Dead End'], ['T-16', 'pe-intel', '# Intel']]) {
@@ -877,6 +1057,7 @@ try {
       await until(() => live, () => output)
       await rpc(action === 'reload' ? {type: 'prompt', message: '/pe-test-reload'} : {type: 'switch_session', sessionPath: plainSession})
       check(!existsSync(scratchFile(taskId, '.done')), `workers: ${action} stops an in-flight worker without marking success`)
+      if (action === 'reload') check(existsSync(scratchFile(taskId, '.interrupted')), 'workers: the interrupted marker survives until its notice is delivered')
       const before = requests.length
       await rpc({type: 'prompt', message: 'Hello from the replacement session.'})
       await until(() => requests.length > before, () => output)
@@ -885,6 +1066,16 @@ try {
       check(!messages.includes('Old worker result must not reach') && !messages.includes(`PE worker ${taskId} completed`) &&
         (action === 'reload' || (!messages.includes(taskId) && !parse(replacement).tools.some(t => t.startsWith('pe_')))),
         `workers: ${action} delivers no late result; plain sessions have no PE tools`)
+      const note = existsSync(scratchFile(taskId, 'interrupted.md')) ? readFileSync(scratchFile(taskId, 'interrupted.md'), 'utf8') : ''
+      check(note.includes(`# ${taskId} interrupted`) && note.includes('Investigate until interrupted.') && note.includes('probe/probe'),
+        `workers: ${action} leaves interrupted.md with the task and model in the worker's scratch`, note)
+      if (action === 'reload') {
+        await until(() => !existsSync(scratchFile(taskId, '.interrupted')), () => output)
+        check(messages.includes('PE: Pi stopped while 1 worker(s) ran') && messages.includes(`${taskId}: Investigate until interrupted.`),
+          'workers: the next lab session hears once which tasks were cut off, and the marker clears after delivery')
+      }
+      // A plain session cannot report a lab's workers; clear the marker so later lab tests start clean.
+      rmSync(scratchFile(taskId, '.interrupted'), { force: true })
       if (action === 'reload') {
         let listed = '', asked = 0
         answer = async request => asked++ === 0 ? tool('pe_list_agents', {}) : (listed = toolResults(request), 'Listed.')
@@ -973,6 +1164,41 @@ finally:
     probe.stdout.on('data', d => { terminalOutput += d }); probe.stderr.on('data', d => { terminalOutput += d })
     const code = await new Promise(r => probe.on('close', r))
     check(code === 0, 'workers and goals: actual Pi TUI status and timer update together', terminalOutput)
+  }
+  // A worker that saves its own answer.md still completes; PE puts its reply beside it.
+  {
+    let stage = 0, wstage = 0, notice = ''
+    answer = async request => {
+      if (workerId(request) === 'T-901') return wstage++ === 0 ? tool('write', {path: '.research/scratch/T-901/answer.md', content: 'Worker-written summary.\n'}) : 'T-901: final reply.'
+      const text = JSON.stringify(request.messages)
+      if (text.includes('PE worker T-901')) notice = text
+      return stage++ === 0 ? tool('pe_subagent', {taskId: 'T-901', task: 'Write your own answer.md, then reply.'}) : 'Noted.'
+    }
+    await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'PE own-answer test'], lab)
+    check(readFileSync(scratchFile('T-901', 'answer.md'), 'utf8') === 'Worker-written summary.\n' &&
+      readFileSync(scratchFile('T-901', 'final-answer.md'), 'utf8').includes('T-901: final reply.') && notice.includes('PE worker T-901 completed'),
+      'workers: a worker that writes its own answer.md completes, with the final reply saved beside it', notice.slice(-400))
+  }
+
+  // A long goal gets a quiet housekeeping reminder between turns, at the lab's interval.
+  {
+    const tidyLab = join(scratch, 'housekeeping-lab')
+    mkdirSync(join(tidyLab, '.research'), { recursive: true })
+    writeFileSync(join(tidyLab, '.research', 'LAB.md'), '# lab\n\n    Housekeeping: 5s\n')
+    let stage = 0, reminded = 0
+    answer = async request => {
+      const seen = request.messages.filter(m => m.role === 'user' && JSON.stringify(m.content).includes('<housekeeping>')).length
+      reminded = Math.max(reminded, seen)
+      switch (stage++) {
+        case 0: return tool('create_goal', {objective: 'Run one slow experiment.'})
+        case 1: return tool('bash', {command: 'sleep 6'})
+        case 2: return tool('get_goal', {})
+        case 3: return updateGoal(request, 'complete')
+        default: return 'Done.'
+      }
+    }
+    await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'Keep at the slow experiment until it is done.'], tidyLab)
+    check(reminded === 1, 'goals: a long goal gets one housekeeping reminder between turns at the lab interval', `saw ${reminded} reminders after ${stage} requests`)
   }
   answer = async () => 'ok'
 } catch (e) { failed = e }

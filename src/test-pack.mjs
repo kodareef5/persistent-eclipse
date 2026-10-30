@@ -24,6 +24,7 @@ put('notes/R-1.md', '---\nid: R-1\ntargets: [intel/paper.txt:1-2]\n---\n# A clai
 put('intel/paper.txt', 'line one\nline two\n'); put('intel/paper.pdf', Buffer.alloc(4096, 7))
 put('intel/INDEX.md', '- paper: intel/paper.txt\n'); put('scratch/T-1/draft.md', 'unpromoted\n')
 put('tools/lint-notes.mjs', '// placed\n'); put('tools/pack.mjs.shipped', '// shipped\n')
+put('local/sessions/private.jsonl', 'private conversation\n'); put('tools/history.mjs', '// placed history tool\n')
 put('lean/proof/.lake/cache', 'generated\n')
 const authored = ['tools/reproduce.py', 'lean/proof/tools/helper.lean', 'intake/batch/manifest.md', 'intel/proof sketch λ.md',
   'intel/COM10.txt', 'intel/CON notes.txt', 'intel/auxiliary.txt', 'intel/LPT0.md']
@@ -40,6 +41,7 @@ check(authored.every(path => file(path)?.action === 'include') && file('reports/
   'plan: keeps authored helpers, nested tools, intake, ordinary filenames, and large reports')
 check(!file('scratch/T-1/draft.md') && !file('tools/lint-notes.mjs') && !file('tools/pack.mjs.shipped') && !file('lean/proof/.lake/cache') && !file('intel/link.md'),
   'plan: excludes scratch, shipped tools, caches, and symlinks')
+check(!file('local/sessions/private.jsonl') && !file('tools/history.mjs'), 'plan: private conversations stay out of the research handoff')
 check(execFileSync('git', ['check-ignore', '.research/exports/p1.pe-pack.zip'], { cwd: lab, encoding: 'utf8' }).trim().endsWith('p1.pe-pack.zip'),
   'packs are gitignored in an existing lab')
 

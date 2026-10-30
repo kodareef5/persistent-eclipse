@@ -5,7 +5,10 @@ description: Investigate mathematical statements, improvements, and counterexamp
 
 # Mathematics
 
-A set of mathematical lenses for the existing lab, not another workflow. Explore what might be true, challenge what looks true, and establish what is actually supported. A useful result may be a proof, counterexample, sharper theorem, connection, or precisely located obstruction.
+Try an idea, see what it teaches you, and let that suggest the next one. A useful
+result may be a proof, counterexample, sharper theorem, connection, or a clear account
+of where an approach breaks. These tables are places to look when you want another
+angle; follow the question wherever it gets interesting.
 
 Read the mission and `pe-git-research`. Use the lab's note kinds, R-IDs, evidence states, links, source pins, review, and promotion; mathematics needs no CVSS. Use `pe-intel`, `pe-survey`, `pe-muse`, `pe-reader`, and `pe-challenger` where useful. Their code-oriented examples are lenses, not a reason to manufacture security claims.
 
@@ -53,4 +56,4 @@ For durable formal work, the manager keeps source, statement-to-declaration mapp
 
 The mission's status words map onto a note's fields: *conjectured* is `kind: hypothesis` with `state: open`; *informally argued* has no `checks`, or `checks: [review]` once another researcher has reconstructed it; *computationally tested* adds `run` and covers only the cases computed; *kernel-checked* adds `proof` for the named statement and axiom basis.
 
-A kernel-checked theorem establishes its **formal proposition under its axiom basis**, not automatically the intended human theorem. Separately inspect proof holes, unusual axioms, and correspondence. Finite computation is not a universal proof; an exactly verified counterexample can refute one. Keep these limits in the lab's existing Validation field, and seek independent challenge before reporting a final result.
+A kernel-checked theorem establishes its **formal proposition under its axiom basis**, not automatically the intended human theorem. Separately inspect proof holes, unusual axioms, and correspondence. Finite computation is not a universal proof; an exactly verified counterexample can refute one. Keep these limits in the lab's existing Validation field, and seek independent challenge before reporting a final result. A result that is complex, uncertain, or high-stakes also passes `pe-layered-challenge` before the lab declares it.

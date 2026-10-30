@@ -208,7 +208,7 @@ expectProblem('a vendor target without a copy is rejected', lab({
 }), /vendor\/srvx@1\.0\.8/)
 
 const long = note('R-1')
-expectProblem('long note needs a Summary', lab({
+expectAdvice('long note without a Summary is advice', lab({
   'R-1.md': `${long}\n${'- filler line\n'.repeat(45)}`,
 }), /Summary/)
 
@@ -240,6 +240,7 @@ expectProblem('a note with no kind or state is reported, not a crash', lab({
 expectClean('checks: optional', lab({ 'R-1.md': note('R-1') }))
 expectClean('checks: any combination of review, run, proof', lab({ 'R-1.md': note('R-1', { checks: '[review, run, proof]' }) }))
 expectProblem('checks: an unknown check is a typo to fix', lab({ 'R-1.md': note('R-1', { checks: '[kernel-checked]' }) }), /check "kernel-checked"/)
+expectAdvice('labels: their count is advice, not failure', lab({ 'R-1.md': note('R-1', { labels: '[area:auth]' }) }), /labels has 1 entries; two to four search best/)
 expectAdvice('labels: a family that repeats a field is advice, not failure', lab({ 'R-1.md': note('R-1', { labels: '[area:auth, status:independent]' }) }), /repeats what state or checks record/)
 {
   const r = run('--dir', lab({ 'R-1.md': note('R-1', { labels: '[area:auth, review:statement-audit]' }) }), '--advice')
@@ -321,6 +322,213 @@ expectAdvice('links: an unlinked R-id in prose is advised', lab({
   !/mentions/.test(r.out) ? ok("links: another lab's id is not an unlinked mention") : fail("links: another lab's id is not an unlinked mention", r.out.slice(-600))
 }
 expectAdvice('length: a very long note is advised to split', lab({ 'R-1.md': note('R-1', {}, '## Summary\nverdict: x\n' + 'line\n'.repeat(220)) }), /lines; keep one claim here/)
+
+// Shared labs: ids name their lab once .research/labs/ exists.
+const shared = (notes, labs = ['mac', 'gpu'], files = []) => {
+  const root = labRoot(notes, [], files)
+  for (const name of labs) mkdirSync(join(root, '.research', 'labs', name), { recursive: true })
+  return root
+}
+const notesOf = root => join(root, '.research', 'notes')
+expectClean('shared: qualified ids and links pass', notesOf(shared({
+  'R-mac-1.md': note('R-mac-1'),
+  'R-gpu-1.md': note('R-gpu-1', { links: '{depends_on: [R-mac-1]}' }),
+})))
+expectClean('solo: a qualified id is fine without labs/', lab({ 'R-mac-3.md': note('R-mac-3') }))
+expectClean('shared: unnamed and named ids live together', notesOf(shared({
+  'R-17.md': note('R-17'),
+  'R-mac-18.md': note('R-mac-18', { links: '{depends_on: [R-17]}' }),
+})))
+expectAdvice('shared: a lab without a folder is advice', notesOf(shared({ 'R-dsk-1.md': note('R-dsk-1') })), /lab "dsk" has no \.research\/labs\/dsk\/ folder yet/)
+{
+  const r = run('--dir', notesOf(shared({ 'R-dsk-1.md': note('R-dsk-1') })), '--strict')
+  r.code === 1 && /lab "dsk"/.test(r.out) ? ok('strict: advice fails under --strict') : fail('strict: advice fails under --strict', r.out.slice(-600))
+}
+expectProblem('ids: a lab id is lowercase and starts with a letter', lab({ 'R-Mac-1.md': note('R-Mac-1') }), /R-<lab>-<n> id/)
+expectAdvice('shared: an unlinked qualified mention is advised', notesOf(shared({
+  'R-mac-1.md': note('R-mac-1'),
+  'R-gpu-2.md': note('R-gpu-2', {}, 'This extends R-mac-1.\n'),
+})), /R-gpu-2: mentions R-mac-1 without a link/)
+expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R-1', { imported_from: `ethfalse:R-gpu-5 sha256:${PACK}`, reported_state: 'open' }) }))
+
+// --qualify renames a lab's notes and runs and rewrites the prose that cites them,
+// but leaves hashed evidence alone.
+{
+  const root = labRoot({
+    'R-1.md': note('R-1', { targets: '[runs/REQ-2/out.txt]' }),
+    'R-2.md': note('R-2', { links: '{depends_on: [R-1]}', targets: '[runs/REQ-2/R-2-update.md]' }, 'Builds on R-1 and newmath:R-1; see REQ-2.\n'),
+  }, [], ['.research/runs/REQ-2/out.txt', '.research/runs/REQ-2/R-2-update.md', '.research/lean/R-1/Main.lean'])
+  const r = (...a) => spawnSync(process.execPath, [lint, ...a], { encoding: 'utf8', cwd: root })
+  writeFileSync(join(root, '.research', 'STATUS.md'), '# Status\nR-2 holds; R-1 is open. REQ-2 reran.\n')
+  writeFileSync(join(root, '.research', 'runs', 'REQ-2', 'out.txt'), 'checked R-1 here\n')
+  writeFileSync(join(root, '.research', 'runs', 'REQ-2', 'README.md'), '# REQ-2\nSupports R-1.\n')
+  const dry = r('--qualify', 'mac')
+  dry.status === 0 && /notes\/R-1\.md -> notes\/R-mac-1\.md/.test(dry.stdout) && /runs\/REQ-2 -> runs\/REQ-mac-2/.test(dry.stdout)
+    && /left as written[\s\S]*runs\/REQ-2\/out\.txt: R-1/.test(dry.stdout) && readFileSync(join(root, '.research', 'notes', 'R-1.md'), 'utf8').includes('id: R-1\n')
+    ? ok('qualify: the dry run reports and changes nothing') : fail('qualify: the dry run reports and changes nothing', dry.stdout + dry.stderr)
+  const done = r('--qualify', 'mac', '--write')
+  const read = rel => readFileSync(join(root, '.research', rel), 'utf8')
+  mkdirSync(join(root, '.research', 'labs', 'mac'), { recursive: true })
+  const after = r('--dir', '.research/notes')
+  done.status === 0 && read('notes/R-mac-2.md').includes('links: {depends_on: [R-mac-1]}') && read('notes/R-mac-2.md').includes('Builds on R-mac-1 and newmath:R-1; see REQ-mac-2.')
+    && read('notes/R-mac-1.md').includes('targets: [runs/REQ-mac-2/out.txt]') && read('STATUS.md').includes('R-mac-2 holds; R-mac-1 is open. REQ-mac-2 reran.')
+    && read('runs/REQ-mac-2/README.md').includes('Supports R-mac-1.') && read('runs/REQ-mac-2/out.txt') === 'checked R-1 here\n'
+    && read('lean/R-mac-1/Main.lean') === 'x\n'
+    && after.status === 0
+    ? ok('qualify: --write renames, rewrites prose, keeps evidence, and lints clean') : fail('qualify: --write renames, rewrites prose, keeps evidence, and lints clean', done.stdout + done.stderr + after.stdout)
+  // A report the record vouches for by hash keeps its bytes.
+  {
+    const root2 = labRoot({ 'R-1.md': note('R-1') })
+    const report = '# Report\nR-1 holds.\n'
+    mkdirSync(join(root2, '.research', 'reports'), { recursive: true })
+    writeFileSync(join(root2, '.research', 'reports', 'final.md'), report)
+    writeFileSync(join(root2, '.research', 'reports', 'draft.md'), report.replace('holds', 'may hold'))
+    mkdirSync(join(root2, '.research', 'local'), {recursive: true})
+    writeFileSync(join(root2, '.research', 'local', 'session.jsonl'), createHash('sha256').update(report.replace('holds', 'may hold')).digest('hex'))
+    const digest = createHash('sha256').update(report).digest('hex')
+    writeFileSync(join(root2, '.research', 'notes', 'R-2.md'), note('R-2', { targets: '[reports/final.md]', checked_at: `sha256:${digest}` }))
+    const q = spawnSync(process.execPath, [lint, '--qualify', 'mac', '--write'], { encoding: 'utf8', cwd: root2 })
+    const kept = readFileSync(join(root2, '.research', 'reports', 'final.md'), 'utf8') === report
+    const moved = readFileSync(join(root2, '.research', 'reports', 'draft.md'), 'utf8').includes('R-mac-1 may hold')
+    q.status === 0 && kept && moved && /left as written[\s\S]*reports\/final\.md/.test(q.stdout)
+      ? ok('qualify: a hashed report keeps its bytes; a hash in private session history does not pin a draft') : fail('qualify: a hashed report keeps its bytes; an unhashed one is rewritten', q.stdout + q.stderr)
+  }
+  const again = r('--qualify', 'mac')
+  if (/nothing to qualify/.test(again.stdout)) ok('qualify: a qualified lab has nothing to do')
+  else fail('qualify: a qualified lab has nothing to do', again.stdout)
+  const bad = r('--qualify', 'Mac')
+  bad.status === 2 ? ok('qualify: rejects a bad lab id') : fail('qualify: rejects a bad lab id', bad.stdout + bad.stderr)
+}
+
+// The inbox: messages between member labs.
+{
+  const message = (fields, body = '# Hello\n') => `---\n${Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n${body}`
+  const withInbox = messages => {
+    const root = shared({ 'R-mac-1.md': note('R-mac-1') })
+    mkdirSync(join(root, '.research', 'inbox'), { recursive: true })
+    for (const [name, text] of Object.entries(messages)) writeFileSync(join(root, '.research', 'inbox', name), text)
+    return root
+  }
+  const good = { from: 'gpu', to: 'mac', kind: 'request', state: 'open', re: '[R-mac-1]' }
+  {
+    const root = withInbox({ '2026-10-29-gpu-review.md': message(good), '2026-10-29-mac-hello.md': message({ from: 'mac', to: 'all', kind: 'hello', state: 'open' }) })
+    spawnSync('git', ['init', '-q'], { cwd: root })
+    spawnSync('git', ['config', 'pe.lab', 'mac'], { cwd: root })
+    const r = run('--dir', notesOf(root))
+    r.code === 0 && /inbox: 2 open, 1 to mac/.test(r.out) ? ok('inbox: well-formed messages pass and open ones are counted for this lab') : fail('inbox: well-formed messages pass and open ones are counted for this lab', r.out.slice(-600))
+  }
+  expectAdvice('inbox: the name carries the date and sender', notesOf(withInbox({ 'review.md': message(good) })), /name is not <yyyy-mm-dd>-<from lab>-<slug>\.md/)
+  expectAdvice('inbox: from matches the name', notesOf(withInbox({ '2026-10-29-mac-review.md': message(good) })), /from "gpu" does not match/)
+  expectAdvice('inbox: labs are members', notesOf(withInbox({ '2026-10-29-gpu-review.md': message({ ...good, to: 'tpu' }) })), /lab "tpu" has no/)
+  expectAdvice('inbox: kind and state come from the lists', notesOf(withInbox({ '2026-10-29-gpu-review.md': message({ ...good, kind: 'memo', state: 'pending' }) })), /kind "memo"[\s\S]*state "pending"/)
+  expectAdvice('inbox: a reply names what it answers', notesOf(withInbox({ '2026-10-29-gpu-ok.md': message({ ...good, kind: 'reply', re: '[]' }) })), /a reply names what it answers/)
+  expectAdvice('inbox: an expired open claim is advised', notesOf(withInbox({ '2026-10-29-gpu-take.md': message({ ...good, to: 'all', kind: 'claim', until: '2026-01-01' }) })), /claim expired on 2026-01-01/)
+}
+
+// --push checks what a push would send.
+{
+  const git = (root, ...a) => spawnSync('git', a, { cwd: root, encoding: 'utf8' })
+  const committed = (notes, files = {}) => {
+    const root = labRoot(notes, [], [])
+    for (const [rel, bytes] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, rel)), { recursive: true })
+      writeFileSync(join(root, rel), bytes)
+    }
+    git(root, 'init', '-q')
+    git(root, 'add', '-A')
+    git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x')
+    return root
+  }
+  const push = root => spawnSync(process.execPath, [lint, '--push'], { cwd: root, encoding: 'utf8' })
+  const target = { targets: '[runs/REQ-1/out.txt]' }
+  {
+    const root = committed({ 'R-1.md': note('R-1', target) }, { '.research/runs/REQ-1/out.txt': 'fine\n' })
+    const r = push(root)
+    r.status === 0 ? ok('push: a clean record passes') : fail('push: a clean record passes', r.stdout)
+  }
+  {
+    const key = 'sk-or-v1-' + 'a'.repeat(40)
+    const root = committed({ 'R-1.md': note('R-1', target) }, { '.research/runs/REQ-1/out.txt': `key=${key}\n` })
+    const r = push(root)
+    r.status === 1 && /\.research\/runs\/REQ-1\/out\.txt:1: looks like a credential/.test(r.stdout) ? ok('push: a credential fails') : fail('push: a credential fails', r.stdout)
+  }
+  {
+    const big = Buffer.alloc(6 * 2 ** 20, 'a')
+    const root = committed({ 'R-1.md': note('R-1', target) }, { '.research/runs/REQ-1/out.txt': 'x\n', '.research/runs/REQ-1/big.bin': big })
+    const r = push(root)
+    r.status === 1 && /big\.bin: 6\.0 MiB; reference it/.test(r.stdout) ? ok('push: a large file fails') : fail('push: a large file fails', r.stdout)
+    writeFileSync(join(root, '.research', 'LARGE.md'), '- `.research/runs/REQ-1/big.bin`: the solver input, too costly to rebuild\n')
+    const r2 = push(root)
+    r2.status === 0 ? ok('push: LARGE.md allows a listed file') : fail('push: LARGE.md allows a listed file', r2.stdout)
+  }
+  {
+    const root = committed({ 'R-1.md': note('R-1', target) })
+    mkdirSync(join(root, '.research', 'runs', 'REQ-1'), { recursive: true })
+    writeFileSync(join(root, '.research', 'runs', 'REQ-1', 'out.txt'), 'later\n')
+    const r = push(root)
+    r.status === 1 && /target "runs\/REQ-1\/out\.txt" is not committed/.test(r.stdout) ? ok('push: an uncommitted target fails') : fail('push: an uncommitted target fails', r.stdout)
+  }
+}
+
+{
+  const git = (root, ...a) => spawnSync('git', a, { cwd: root, encoding: 'utf8' })
+  const commit = (root, message) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', message) }
+  const push = root => spawnSync(process.execPath, [lint, '--push'], { cwd: root, encoding: 'utf8' })
+  // A credential committed and then deleted still travels in history.
+  {
+    const root = labRoot({ 'R-1.md': note('R-1') })
+    git(root, 'init', '-q')
+    writeFileSync(join(root, '.research', 'key.txt'), 'token=ghp_' + 'b'.repeat(36) + '\n')
+    commit(root, 'oops')
+    rmSync(join(root, '.research', 'key.txt'))
+    commit(root, 'remove it')
+    const r = push(root)
+    r.status === 1 && /key\.txt \(in an outgoing commit, no longer at HEAD\):1: looks like a credential/.test(r.stdout)
+      ? ok('push: a credential in an earlier outgoing commit fails') : fail('push: a credential in an earlier outgoing commit fails', r.stdout)
+  }
+  // Vendor evidence must arrive with the push too.
+  {
+    const root = labRoot({ 'R-1.md': note('R-1', { targets: '[vendor/srvx@1.0.8/index.mjs]' }) })
+    git(root, 'init', '-q')
+    commit(root, 'note')
+    mkdirSync(join(root, '.research', 'vendor', 'srvx@1.0.8'), { recursive: true })
+    writeFileSync(join(root, '.research', 'vendor', 'srvx@1.0.8', 'index.mjs'), 'x\n')
+    const r = push(root)
+    r.status === 1 && /target "vendor\/srvx@1\.0\.8\/index\.mjs" is not committed/.test(r.stdout)
+      ? ok('push: uncommitted vendor evidence fails') : fail('push: uncommitted vendor evidence fails', r.stdout)
+  }
+  // The lab remote decides, not Git's default destination.
+  {
+    const bare = mkdtempSync(join(tmpdir(), 'pe-remote-'))
+    roots.push(bare)
+    git(bare, 'init', '-q', '--bare')
+    const root = labRoot({ 'R-1.md': note('R-1') })
+    writeFileSync(join(root, '.research', 'LAB.md'), '# Lab\n\n    Sync: shared main\n')
+    git(root, 'init', '-q', '-b', 'main')
+    commit(root, 'lab')
+    git(root, 'remote', 'add', 'origin', bare)
+    git(root, 'remote', 'add', 'shared', bare)
+    git(root, 'push', '-q', '-u', 'origin', 'main')
+    git(root, 'fetch', '-q', 'shared')
+    const r = push(root)
+    r.status === 1 && /git push would go to origin\/main, but the lab shares shared\/main/.test(r.stdout)
+      ? ok('push: a default destination other than the lab remote fails') : fail('push: a default destination other than the lab remote fails', r.stdout)
+    git(root, 'branch', '-q', '--set-upstream-to=shared/main')
+    const r2 = push(root)
+    r2.status === 0 ? ok('push: the lab remote as upstream passes') : fail('push: the lab remote as upstream passes', r2.stdout)
+    // The Sync line is read alone, never with the next line as its branch.
+    writeFileSync(join(root, '.research', 'LAB.md'), '# Lab\n\n    Sync: origin\nUnnamed ids: old\n')
+    git(root, 'branch', '-q', '--set-upstream-to=origin/main')
+    const r3 = push(root)
+    r3.status === 0 ? ok('push: a Sync line without a branch means main, whatever follows it') : fail('push: a Sync line without a branch means main, whatever follows it', r3.stdout)
+  }
+}
+
+// One credential list: the linter's push check and the packer warn on the same patterns.
+{
+  const list = file => /const SECRETS = (\[[\s\S]*?\]);/.exec(readFileSync(join(here, file), 'utf8'))?.[1]
+  list('lint-notes.mjs') && list('lint-notes.mjs') === list('pack.mjs') ? ok('push: SECRETS matches pack.mjs') : fail('push: SECRETS matches pack.mjs', 'the two lists differ')
+}
 
 // --sha must describe the file the lab will write.
 const source = readFileSync(lint, 'utf8').replace(/\s+$/, '') + '\n'

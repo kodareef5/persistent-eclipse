@@ -73,4 +73,6 @@ New products rarely invent entirely new security primitives. They compose old on
 
 {{table:frontier.examples}}
 
+The layers and lenses of `pe-layered-challenge` also map unasked questions: a cell no one has read on the lab's central claims is an angle. Negations labelled `layer:` show where this lab's errors have lived; look there first.
+
 A fresh attack idea is not a finding. Carry forward the source path, lower-trust actor, intended control, plausible violation, and the **one missing fact** that would distinguish a real bug from a false positive. Let the existing lab prove, disprove, record, and report it. Do not turn these tables into a coverage checklist or a CWE inventory.

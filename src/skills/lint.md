@@ -1,122 +1,124 @@
 ---
 name: pe-lint
-description: Check the lab record's shape: ids, frontmatter, links, dependency pins, and the sections a claim needs. Run after editing notes and before a commit.
+description: Find broken references, missing evidence, and awkward note formatting. Use the findings to help the next reader.
 ---
 
 # Lint
 
-## Tools
-`bash` for `node .research/tools/lint-notes.mjs`; `read` the problem it names; `edit` the note.
-
-## The linter
-`.research/tools/lint-notes.mjs` checks that the record is well formed. It never judges
-whether a claim is true, and a clean run is not evidence for anything.
-
-The runtime places that file in the lab the first time the lab is opened, and never
-replaces it afterwards, so a lab keeps the linter its record was built with. Do not
-retype it: a hand-written copy is not the same bytes, and a digest nobody can reproduce
-stops the lab. If it is missing, the placement did not happen — report that and continue
-without lint. The source is below, to read, not to copy out.
-
-Before the first use in a session, hash the copy without running it:
-
-    shasum -a 256 .research/tools/lint-notes.mjs
-
-It prints `{{lint.sha256}}` when the lab holds the copy this skill ships. `sha256sum`
-prints the same digest where `shasum` is absent, and on Windows
-`certutil -hashfile .research/tools/lint-notes.mjs SHA256` does. Never run the file to
-learn its hash, because a modified script can print any hash it likes.
-
-Any other digest means the lab is running a different linter. That is normal after an
-upgrade, and it is also what a hand edit looks like, so the difference decides: the
-runtime leaves the shipped bytes beside it, and
-
-    diff .research/tools/lint-notes.mjs .research/tools/lint-notes.mjs.shipped
-
-says which case it is. When the difference is the tool's own history — the same checks,
-newer — lint with the lab's copy, name the digest you ran and the one this skill prints in
-the commit message, so the record says which linter judged it, and tell the operator.
-Stop and report when the difference deletes or weakens a check, or you cannot explain it;
-never edit a check away to make a note pass. Deleting the copy makes the runtime place the
-current one on the next open. A subagent hashes and runs it in its own scratch.
-
-Run it after writing or editing notes, and before any commit:
+Run the checker after editing notes and before committing:
 
     node .research/tools/lint-notes.mjs
 
-`--dir <path>` lints another directory. It prints a summary, one line per note, then every
-problem with the note it belongs to. Fix the note, never the linter: when a check is wrong,
-that is feedback for the operator, not a rule to edit away.
+It checks the record's shape and references. A clean run says nothing about whether
+a claim is true. Fix findings that matter; when a convention doesn't fit, explain
+why in FEEDBACK and keep working. Leave the checker intact so others can reproduce
+its findings.
 
-## Canonical notes and drafts
-A note in `.research/notes/` is canonical: its filename is its unpadded `R-<n>` id and
-`id:` must match it.
+## Options
 
-A subagent's draft is not canonical yet. It lives in `.research/scratch/T-<id>/`, carries
-`id: draft`, and links to the notes it will sit beside, so lint it in draft mode:
+| Option | Use it for |
+| --- | --- |
+| `--dir <path>` | Check notes in another directory. |
+| `--draft` | Check a worker's draft before the manager gives it an R-ID. |
+| `--advice` | Show suggestions usually hidden behind a count. |
+| `--push` | Check outgoing history and whether cited evidence will travel. |
+| `--strict` | Fail on advice too, if you want conventions enforced. |
+
+Labels, summaries, long notes, inbox formatting, and missing lab folders are advice.
+So are possible inconsistencies: a supported refutation of a still-supported note,
+for example. Read the evidence and decide what needs changing.
+
+## Which copy am I running?
+
+The runtime places the checker in `.research/tools/` and preserves existing copies.
+If it's missing, report the placement problem and continue without lint. Use the
+provided file rather than retyping the embedded source below.
+
+Before first use in a session, hash it externally:
+
+    shasum -a 256 .research/tools/lint-notes.mjs
+
+The shipped digest is `{{lint.sha256}}`. `sha256sum` also works; on Windows use
+`certutil -hashfile .research/tools/lint-notes.mjs SHA256`. Don't ask an unknown
+script for its own hash by running it.
+
+A different digest may just mean an older version. Compare it with the shipped copy:
+
+    diff .research/tools/lint-notes.mjs .research/tools/lint-notes.mjs.shipped
+
+For a known older version, record both digests in the commit message and let the
+operator know. You can keep using it or adopt the shipped version. Removing the old
+copy lets the runtime place the current one on the next open. If the differences
+are unexplained or remove useful checks, report them and set that copy aside.
+Researchers can continue with other checks while this is resolved.
+
+An old linter may reject `R-redfox-3`. That is a tool limitation; leave other labs'
+notes alone. Use a compatible copy or the checks you can run. Adopting a newer
+linter doesn't require cleaning up every older note first.
+
+## Notes and drafts
+
+Canonical notes live in `.research/notes/`. Their filename and `id:` agree:
+`R-17.md` has `id: R-17`; `R-redfox-17.md` has `id: R-redfox-17`. Both forms can coexist.
+
+A worker's draft stays in its task scratch and uses `id: draft`:
 
     node .research/tools/lint-notes.mjs --dir .research/scratch/T-17 --draft
 
-Draft mode allows `id: draft`, skips the filename and id match, and resolves `links`
-against `.research/notes`. Everything else is checked, including dependency pins, which
-resolve from the lab's `.research` root rather than from the scratch directory. On
-promotion the manager assigns the R-id, writes the canonical note, and lints
-`.research/notes` again before the commit.
+Draft mode resolves links against canonical notes and checks dependencies from the
+lab's `.research` root. The manager assigns an R-ID when keeping the finished note
+and runs lint on the shared notes again.
 
-## What it checks
-- the filename is an unpadded `R-<n>` id and matches `id:` (canonical mode)
-- `kind` and `state` come from the fixed lists, and any `checks` from `review`, `run`, `proof`
-- `labels` holds two to four `family:value` entries
-- every `targets` entry sits under `sources/<source>/`, names an existing
-  `vendor/<pkg>@<version>/` copy, or names an existing file of the record's own under
-  `intel/`, `runs/`, `reports/`, `notes/`, `lean/`, or `patches/`; only a draft may
-  target its own `scratch/`
-- `checked_at` is a full 40-character source SHA, `sha256:<hash>` for a pending archive, or
-  `<sha> <pkg>@<version>` for a dependency read, which requires
-  `.research/vendor/<pkg>@<version>/` to exist
-- `links` names only the four relations, and every target is an existing note
-- `## Claim` and `## Evidence` are present, and `## Summary` is present on a finding or a
-  note past about forty lines
+When joining would cause an ID collision, `--qualify <lab>` previews renames of
+unnamed notes, runs, and proof folders, plus edits to their references. `--write`
+applies them. Inspect the evidence and script paths it leaves for you to handle;
+otherwise existing addresses can stay as they are.
 
-## Advice
-Advice never fails lint. Routine runs print only how many suggestions there are; run
-with `--advice` to list them when tidying the record. Each points at a judgement for
-the author: an R-ID mentioned in prose but not linked, a note past about two hundred
-lines, a `status:` or `state:` label, a label missing from an existing LABELS.md, a
-`supersedes` link and `state: superseded` that disagree, or a supported refutation whose
-target is still supported. Act on it when it is right; a passing comparison can stay prose.
+## What the checker looks for
 
-## Adopting a newer linter
-A newer linter can require what older notes lack. Fix the record in one `lab:` commit
-rather than weakening a check. In particular, promote any `scratch/` artifact a
-canonical note cites into `runs/`, `reports/`, `intel/`, or `lean/`, since scratch is not
-kept. Treat the advice as a reading list, not a migration you must finish first.
+- A matching filename and `id:`, recognized `kind`, `state`, and optional `checks`.
+- `## Claim` and `## Evidence` sections, so readers can find both.
+- Existing link targets and recognized relations: `supports`, `refutes`, `depends_on`,
+  and `supersedes`.
+- Evidence paths under sources, vendor, or the record's intel, runs, reports, reviews,
+  notes, lean, and patches folders. Only drafts may cite scratch.
+- A `checked_at` source SHA, archive hash, or source SHA plus dependency version.
 
-## Links grammar
-`links: {}` when there is no relation, otherwise one or more relations, each with its own
-bracketed list:
+For example, keep a relationship explicit:
 
     links: {refutes: [R-31, R-42], depends_on: [R-18]}
 
-A list holds commas of its own, so never split a relation on commas. The linter parses
-whole `name: [...]` groups for that reason, and rejects text outside them.
+Use `links: {}` when there is none. Each relation has its own bracketed list; commas
+inside those lists aren't separators between relations.
 
-## Dependency reads
-When the load-bearing code is in a dependency rather than the pinned tree, vendor the
-published files under `.research/vendor/<pkg>@<version>/` and name the pair in the note:
+A canonical note's evidence needs a lasting home. Move useful scratch artifacts to
+runs/, reports/, intel/, or lean/ before citing them in the shared record.
 
-    checked_at: <source sha> h3@2.0.8
+For a dependency read, keep its published files under `vendor/<pkg>@<version>/` and
+record the source revision and dependency, for example:
 
-The linter fails on a dependency pin with no matching vendor directory, so a reader can
-always reach the bytes the note was written against.
+    checked_at: <40-character source sha> h3@2.0.8
 
-For a lab-pack import, the copy may instead live under
-`intel/imported/<lab>-<pack>/research/vendor/<pkg>@<version>/`. An imported note must
-target an existing file in that copy; `checked_at` keeps the original dependency pin.
+An archive uses `sha256:<hash>`. For a lab-pack import, a dependency may instead live
+under `intel/imported/<lab>-<pack>/research/vendor/<pkg>@<version>/`; target that copy
+and retain the original dependency pin.
 
-## The linter source
-What the runtime writes to `.research/tools/lint-notes.mjs`, kept here so the lab can be
-checked by hand. Edit it only by changing this file and rebuilding.
+## Before sharing
+
+`--push` checks every outgoing commit for possible credentials and files over 5 MiB,
+and checks that locally available evidence is committed. Record intentional large
+files in `.research/LARGE.md` with a reason, or use references as pe-export describes.
+Resolve genuine credential leaks and missing evidence before pushing; a deleted
+credential may still be in outgoing history.
+
+The inbox summary counts structured open messages and those addressed to your
+`pe.lab` ID. Plain contributions count as research too, even when the checker can't
+route them; read the inbox as well as its counts.
+
+## Embedded source
+
+The runtime writes these bytes to the lab. To change the shipped checker, edit
+`src/lint-notes.mjs` in the package and rebuild.
 
 ```js lint-notes.mjs
 {{lint.mjs}}```

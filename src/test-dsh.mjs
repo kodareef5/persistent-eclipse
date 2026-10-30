@@ -5,6 +5,7 @@
 // while Harness runs and checks the worker sees each change with no duplicates.
 // Usage: node src/test-dsh.mjs /path/to/dsh/apps/cli/lib/bin.js
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { reportData } from './history.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -62,7 +63,7 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                       after,
                     }
                   }
-                  let coldResult, missionSession
+                  let coldResult, missionSession, historyWorker
                   const tick = async () => {
                     try {
                       const inLab = await names(${JSON.stringify(lab)})
@@ -70,11 +71,22 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                       const body = (await reg.get('pe-reader', { cwd: ${JSON.stringify(lab)}, scope }))?.content ?? ''
                       coldResult ??= await coldStart()
                       await names(${JSON.stringify(drift)})
+                      if (!${inspectMission} && !historyWorker) {
+                        historyWorker = ctx.get('sessions').create(undefined, {meta: {cwd: ${JSON.stringify(lab)}, origin: 'subagent', parentSession: 'fixture-parent'}})
+                        historyWorker.append('request/context', {provider: 'fixture', model: 'worker-probe'})
+                        historyWorker.append('assistant/attempt', {turn: 1, step: 1, stream: []})
+                      }
                       let mission
                       if (${inspectMission}) {
                         const prompt = ctx.get('systemPrompt')
                         const initial = (await prompt.assemble({scope})).variables.pe_mission
-                        missionSession ??= ctx.get('sessions').create(undefined, {meta: {cwd: ${JSON.stringify(missionNested)}}})
+                        if (!missionSession) {
+                          missionSession = ctx.get('sessions').create(undefined, {meta: {cwd: ${JSON.stringify(missionNested)}}})
+                          missionSession.append('request/context', {provider: 'fixture', model: 'history-probe'})
+                          missionSession.append('request/header', {reason: 'initial', header: {config: {provider: 'fixture', model: 'history-probe', reasoningEffort: 'high'}}})
+                          missionSession.append('assistant/attempt', {turn: 1, step: 1, stream: []})
+                          missionSession.append('assistant/attempt', {turn: 1, step: 1, stream: [{type: 'chunk', time: Date.now(), chunk: {type: 'usage', usage: {inputTokens: 12, outputTokens: 3, cacheReadTokens: 4}}}]})
+                        }
                         const persisted = (await prompt.assemble({scope, agent: {id: missionSession.id, session: missionSession, ctx, options: {}}})).variables.pe_mission
                         mission = {initial, persisted}
                       }
@@ -90,6 +102,7 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
 // A host row that writes what the preset registry reports, the same list the
 // Agent presets screen shows, including each preset's load failure.
 const presets = join(home, 'presets.json')
+const selection = join(home, 'selection.json')
 const presetProbe = `- insert:
     - id: pe-boot-presets
       name: '@deepseek-ai/dsh-skill-filesystem'
@@ -100,9 +113,32 @@ const presetProbe = `- insert:
         customSkillDirs: !!js |
           (() => {
             const fs = process.getBuiltinModule('node:fs')
+            const selections = {}
+            const scopeOf = ctx => { for (let o = ctx; o; o = Object.getPrototypeOf(o)) { const k = Object.getOwnPropertySymbols(o).find(x => x.description === 'dsh.scope'); if (k) return o[k] } }
             const tick = async () => {
-              try { fs.writeFileSync(${JSON.stringify(presets)}, JSON.stringify(await ctx.get('agentPresets').list())) }
-              catch (e) { fs.writeFileSync(${JSON.stringify(presets)}, JSON.stringify({ error: e.stack })) }
+              try {
+                fs.writeFileSync(${JSON.stringify(presets)}, JSON.stringify(await ctx.get('agentPresets').list()))
+                const settings = ctx.get('subagentModelSelection').current()
+                const key = settings.enabled ? 'on' : 'off'
+                if (!selections[key]) {
+                  const handle = await ctx.get('agents').create({
+                    sessionId: 'pe-selection-' + key + '-' + Date.now(),
+                    meta: {cwd: ${JSON.stringify(notLab)}},
+                    agentOptions: {provider: 'fixture', model: 'parent'},
+                    setup: agentCtx => ctx.get('agentPresets').mount(agentCtx, 'persistent-eclipse').then(() => undefined),
+                  })
+                  try {
+                    const schemas = ctx.get('tools').schemas(scopeOf(handle.agent.ctx))
+                    selections[key] = {
+                      fields: Object.keys(schemas.find(s => s.name === 'subagent')?.parameters?.properties ?? {}),
+                      discovery: schemas.filter(s => s.name === 'list_subagent_models').length,
+                      policy: handle.agent.session.snapshotEvents().find(e => e.type === 'subagent/model-selection-policy')?.data ?? null,
+                    }
+                  } finally { await handle.dispose() }
+                }
+                fs.writeFileSync(${JSON.stringify(selection)}, JSON.stringify(selections))
+              } catch (e) { fs.writeFileSync(${JSON.stringify(selection)}, JSON.stringify({error: e.stack})) }
+              globalThis.setTimeout(tick, 1000)
             }
             globalThis.setTimeout(tick, 3000)
             return []
@@ -131,13 +167,13 @@ child.stderr.on('data', d => { stderr += d })
 
 const want = ['pe-challenger', 'pe-dead-end', 'pe-fleet', 'pe-git-research', 'pe-intel',
   'pe-cvss', 'pe-lint', 'pe-migrator', 'pe-muse', 'pe-coderunner', 'pe-reader',
-  'pe-reporter', 'pe-survey', 'pe-patch', 'pe-math', 'pe-web', 'pe-export'].sort()
+  'pe-reporter', 'pe-survey', 'pe-patch', 'pe-math', 'pe-web', 'pe-export', 'pe-sync', 'pe-layered-challenge', 'pe-history', 'pe-models', 'pe-model-notes'].sort()
 const read = file => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null } }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 async function until(label, check, ms = 45000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) if (check()) return console.log('ok  ', label)
-  throw new Error(`${label}: ${JSON.stringify({ presets: read(presets), manager: read(manager), worker: read(worker) })}`)
+  throw new Error(`${label}: ${JSON.stringify({ presets: read(presets), manager: read(manager), worker: read(worker), selection: read(selection) })}`)
 }
 const library = (heading, r) => r && same(r.inLab, want) && same(r.outside, []) && r.heading === heading
 // The mode also registers pe-kickoff for the manager, in a lab or not, so it can make
@@ -155,7 +191,7 @@ const placed = (dir, name) => {
   const source = join(dirname(patch), 'src', name)
   return existsSync(file) && readFileSync(file).equals(readFileSync(source))
 }
-const toolsPlaced = () => placed(lab, 'lint-notes.mjs') && placed(lab, 'cvss.mjs') && placed(lab, 'pack.mjs')
+const toolsPlaced = () => placed(lab, 'lint-notes.mjs') && placed(lab, 'cvss.mjs') && placed(lab, 'pack.mjs') && placed(lab, 'history.mjs')
   && placed(join(cold, 'pe-boot-probe-manager'), 'lint-notes.mjs') && placed(join(cold, 'pe-boot-probe-manager'), 'cvss.mjs')
 const toolsKept = () => !existsSync(join(notLab, '.research'))
 
@@ -175,6 +211,16 @@ try {
   await until('mission: Blue Team by default, and the lab\'s own MISSION.md once it has one', () => {
     const mission = read(manager)?.mission
     return mission?.initial === missions['blue-team'] && mission.persisted === customMission
+  })
+  await until('history: host observer retains a real DSH session and an unmetered attempt', () => {
+    const data = reportData(missionLab)
+    return data.usage.sessions.length === 1 && data.usage.calls === 2 && data.usage.unmetered === 1
+      && data.usage.rows[0]?.effort === 'high' && data.usage.rows[0]?.sums.input === 12
+      && data.collective.labs.some(row => row.local && row.calls === 2)
+  })
+  await until('history: a standard worker is captured by the host without a PE manager plugin', () => {
+    const data = reportData(lab)
+    return data.usage.sessions.some(s => s.role === 'worker' && s.parent === 'fixture-parent')
   })
   customMission += 'The operator updated the mission during the session.\n'
   writeFileSync(missionFile, customMission)
@@ -202,6 +248,19 @@ try {
 
   writeFileSync(homePatch, text)
   await until('restore: the full set again, no duplicates', () => library('# Reader', read(worker)))
+
+  await until('models: DSH leaves selection off without an operator setting', () => {
+    const off = read(selection)?.off
+    return off && !off.fields.includes('model') && off.discovery === 0 && off.policy === null
+  })
+  // Change only this isolated test home's setting, then inspect a fresh Agent.
+  const allowed = [{provider: 'fixture', model: 'scout'}]
+  writeFileSync(homePatch, text + '\n- id: subagent-model-selection-settings\n  config:\n    enabled: true\n    allowedModels: ' + JSON.stringify(allowed) + '\n')
+  await until('models: DSH offers discovery and selection with the exact operator-approved routes', () => {
+    const on = read(selection)?.on
+    return on && ['provider', 'model', 'reasoning_effort'].every(f => on.fields.includes(f)) &&
+      on.discovery === 1 && same(on.policy?.allowedModels, allowed)
+  })
 } catch (e) { failed = e }
 child.kill('SIGKILL')
 for (const dir of [home, lab, notLab, cold, drift, missionLab]) rmSync(dir, { recursive: true, force: true })

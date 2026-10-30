@@ -1,6 +1,6 @@
 ---
 name: pe-patch
-description: Turn supported findings into minimal, compatible fixes with regression tests, reproducible validation, and PR-ready artifacts.
+description: Fix supported bugs at their cause, with compatible patches, regression checks, and clear PR drafts.
 ---
 
 # Patch
@@ -33,11 +33,14 @@ Compare candidate guards before choosing one:
 - **Consistency:** Reuse established validation patterns and error handling.
 - **Alternatives:** Record why simpler, earlier, later, or broader guards were rejected.
 
-Prefer the smallest sufficient change. Avoid opportunistic refactoring, speculative hardening, new dependencies, and unrelated cleanup.
+Prefer the smallest sufficient change. If a local guard leaves the same bug reachable
+elsewhere, compare it with removing or replacing the unsafe design. Let the finding
+justify that scope, check affected callers, and explain the compatibility cost. Keep
+unrelated refactoring and speculative hardening for another task.
 
 ## Patch Construction
 1. **Pin:** Record the exact source commit and affected symbols.
-2. **Guard:** Draft the minimal change against that revision.
+2. **Guard:** Draft the focused correction against that revision.
 3. **Regress:** Add a focused check for the original failing case.
 4. **Preserve:** Cover nearby valid inputs, boundary values, and existing behavior.
 5. **Inspect:** Review the full diff for side effects, bypass paths, and accidental changes.

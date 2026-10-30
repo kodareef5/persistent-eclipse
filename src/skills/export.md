@@ -14,8 +14,11 @@ The receiver keeps attribution and treats imported claims as reported. Nothing m
 - Replace downloadable or rebuildable bulky bytes with references when their origin
   is known: origin, size, sha256, and summary. This includes page images rebuildable
   from a PDF; name the PDF, pages, and rendering command. Keep cited text extracts whole.
-- Exclude scratch, source checkouts, caches, old exports, and runtime-shipped tools.
+- Exclude scratch, private `.research/local/` history, source checkouts, caches, old exports, and runtime-shipped tools.
   Sources travel as pins. List unpromoted drafts as open work in the README.
+
+For the workspace, Git history, and agent conversations too, use pe-history's
+private archive. This pack stays focused on the research record.
 
 ## Pack
 An operator request to export authorizes creating a local pack. Read SCOPE.md and

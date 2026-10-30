@@ -1,6 +1,6 @@
 ---
 name: pe-kickoff
-description: Make a workspace into a lab, add sources, import archives, and set or amend the lab's mission. Run before you use the other skills.
+description: Make a workspace into a lab, join a shared lab, add sources, import archives, and set or amend the lab's mission. Run before you use the other skills.
 ---
 
 # Kickoff
@@ -67,9 +67,12 @@ Initialize:
        .research/FLEET.md      live subagents and their tasks
        .research/WATCH.md      upstream watch list
        .research/FEEDBACK.md    lab and tooling friction, for the operator
+       .research/labs/<lab>/    each lab's host, queue, fleet, and cadence, once shared
+       .research/inbox/         messages between labs, once shared
        .research/intel/         dated public intel, readable by every subagent
        .research/intel/INDEX.md one line per intel note, read first by subagents
        .research/reports/       prepared mission deliverables, for the operator
+       .research/reviews/       impact reviews and layered challenges
        .research/exports/       lab packs for another lab, with their plans
        .research/patches/       durable patches and validation (blue team)
        .research/lean/          durable proof projects and scripts (math)
@@ -89,6 +92,11 @@ Initialize:
    source additions or pin moves without asking each time. Researchers return
    their work for the manager to review and commit.
 
+   A lab with a private remote syncs its record there by default (pe-sync); the
+   operator stops that with `Sync: off`. During a goal, Pi reminds the lab to tidy up
+   and look for fresh angles every six hours; `Housekeeping: <n>h` changes that, and
+   `Housekeeping: off` stops it.
+
    `Execution: local` means all agents can search the web, clone relevant sources,
    install ordinary build and research dependencies, write code, and run local
    experiments. Prefer project-local or user-local dependencies. Small checks run
@@ -105,7 +113,8 @@ Initialize:
    When asked to adopt these defaults in an existing lab, reconcile old workflow
    wording in LAB, ENV, and MISSION. Preserve the objective, evidence, and any
    specific operator limits the request did not change.
-   Before the first commit, check `git config user.name` and `git config user.email`. If
+   Before the first commit, check `git config user.name` and `git config user.email`. A
+   named lab in a shared record commits as itself (pe-sync). Otherwise, if
    either is empty, set the lab's own identity rather than stalling:
    `git config user.name "Persistent Eclipse"` and
    `git config user.email "persistent-eclipse@model-effort"`.
@@ -143,6 +152,13 @@ Start from a lab pack:
   pins. For the requested import, add relevant sources at those pins and import with
   pe-migrator. The new lab uses the research defaults above or the operator's explicit
   choices; a pack does not import execution or commit restrictions.
+
+Join a shared lab:
+- Labs that share one research program share its record through a private remote.
+  Set up nothing here first: the shared record is the lab. For a new lab, clone the
+  remote the operator gives into this empty directory (`git clone <url> .`); LAB.md
+  then exists and pe-sync loads on the next turn. Follow its Join steps, as a new lab
+  or with this lab's existing record.
 
 Record in ENV.md the build tools present, the disk and memory to rely on, and what
 you confirmed you can build or run. A worker reaches only what you can.

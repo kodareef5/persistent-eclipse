@@ -1,6 +1,6 @@
 ---
 name: pe-reporter
-description: Convert findings into portable GHSA shaped reports.
+description: Write the report the mission needs, with clear evidence and the right detail for its audience.
 ---
 
 # Reporter
@@ -15,12 +15,15 @@ description: Convert findings into portable GHSA shaped reports.
 - The task brief must include the **entire current mission verbatim**, including audience, scope, acceptance criteria, and deliverable.
 - Read `.research/MISSION.md` when present. Resolve missing, truncated, or conflicting instructions with the manager.
 - Never infer requirements from the skill name, severity, or earlier reports.
-- Default security deliverable: a short, standalone, GHSA-shaped advisory.
+- The mission chooses the deliverable: Blue Team prepares a patch PR, Red Team a
+  GHSA-shaped advisory, and Math Team a research note. Other missions can name their own.
 - If the mission explicitly requires a patch PR or mathematical note, follow that deliverable instead; use `pe-patch` or `pe-math` evidence conventions.
 - Evaluate every mission acceptance criterion. Record unmet criteria rather than silently relaxing them.
 
 ## Evidence Intake
-Before drafting, establish:
+For security findings, establish the following. For mathematics, use pe-math
+and the mission's statement, argument, and verification requirements.
+
 
 - **Primitive:** Exact operation, broken invariant, missing guard, or trust-boundary failure.
 - **Trigger:** Minimum input, actor, state, and conditions needed to reach it.
@@ -178,4 +181,4 @@ A complete-looking document is not necessarily a validated advisory. Label incom
 - Do not substitute static reasoning for an executed result.
 - No arbitrary severity threshold; the mission defines report eligibility.
 - A strong advisory is short because the evidence is precise, not because the important qualifications were removed.
-- **Deliver a defensible GHSA draft, not a vulnerability essay.**
+- Deliver the mission's report with enough evidence for its intended reader to check it.
