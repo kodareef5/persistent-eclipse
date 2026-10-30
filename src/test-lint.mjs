@@ -410,6 +410,10 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     return root
   }
   const good = { from: 'gpu', to: 'mac', kind: 'request', state: 'open', re: '[R-mac-1]' }
+  expectClean('inbox: anonymous plain contributions need no registration or metadata',
+    notesOf(withInbox({ 'review.md': '# Check R-mac-1\nThe empty input case still needs a reproduction.\n' })), '--strict')
+  expectAdvice('inbox: an unfinished metadata block still gets routing advice',
+    notesOf(withInbox({ '2026-10-29-gpu-review.md': '---\nfrom: gpu\n# Missing closing delimiter\n' })), /missing frontmatter block/)
   {
     const root = withInbox({ '2026-10-29-gpu-review.md': message(good), '2026-10-29-mac-hello.md': message({ from: 'mac', to: 'all', kind: 'hello', state: 'open' }) })
     spawnSync('git', ['init', '-q'], { cwd: root })

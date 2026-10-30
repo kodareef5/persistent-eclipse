@@ -354,7 +354,7 @@ try {
   check(reader.user.includes('<skill name="pe-reader"') && reader.user.includes(want['pe-reader'].body), 'lab: /skill:pe-reader expands the skill')
 
   const outside = await ask(notLab, 'hello')
-  check(!outside.system.includes('# Persistent Eclipse') && !listed(outside.system).some(s => s.name.startsWith('pe-')),
+  check(!outside.system.includes('# Persistent Eclipse') && !listed(outside.system).some(s => s.name.startsWith('pe-') || s.name === 'persistent-eclipse'),
     'outside a lab: no persona and no skills')
   check(!outside.tools.some(t => t.startsWith('pe_') || goalTools.includes(t)) && !outside.tools.includes('subagent'), 'outside a lab: no PE worker or goal tools')
 

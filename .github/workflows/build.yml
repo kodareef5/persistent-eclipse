@@ -1,0 +1,80 @@
+# Build cordis.patch.yml from src/, test it in Pi, and keep main in
+# sync: a push that changes src/ gets the rebuilt cordis.patch.yml committed
+# back. A push that edits a generated file by hand, so it no longer matches src/, fails
+# instead of being overwritten. Run it by hand with `gh workflow run build.yml`.
+# DSH is not public, so src/check.sh remains the local check for it.
+# The repo variable PE_RUNNER can name a self-hosted runner for pushes and manual runs.
+# Pull requests always run on GitHub's ubuntu-latest, so a fork never runs on it.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+
+env:
+  GENERATED: cordis.patch.yml
+
+jobs:
+  build:
+    runs-on: ${{ github.event_name != 'pull_request' && vars.PE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Build
+        run: python3 src/build.py
+
+      - name: Compare with what was pushed
+        id: drift
+        run: |
+          if [ -z "$(git status --porcelain -- $GENERATED)" ]; then
+            echo "Generated files match src/."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git status --short -- $GENERATED
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "::error::Generated files do not match src/. Run python3 src/build.py and commit, or let the main build do it after merge."
+            exit 1
+          fi
+          before="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = push ] && [ -n "$before" ] && ! echo "$before" | grep -qx '0*' \
+             && [ -n "$(git diff --name-only "$before" "${{ github.sha }}" -- $GENERATED)" ]; then
+            echo "::error::This push edits generated files, and they do not match src/. Make the change in src/ (or rebuild after your last src/ edit) and push again."
+            exit 1
+          fi
+
+      # Into the job's own directory, so a self-hosted runner keeps its machine's own Pi.
+      - name: Install Pi
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pe-tools" --no-save --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0
+          echo "$RUNNER_TEMP/pe-tools/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: |
+          for t in cvss lint pack; do echo "-- $t"; node src/test-$t.mjs; done
+          for t in history retry; do echo "-- $t"; node --test src/test-$t.mjs; done
+          echo "-- pi"; node src/test-pi.mjs pi
+
+      - name: Commit the rebuilt files
+        if: steps.drift.outputs.changed == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- $GENERATED
+          git commit -m "Build from ${GITHUB_SHA::7}"
+          git push origin HEAD:main

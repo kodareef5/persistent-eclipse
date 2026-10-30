@@ -78,6 +78,26 @@ Initialize:
        .research/lean/          durable proof projects and scripts (math)
        .research/notes/
        .research/.gitignore    scratch/, tools/*.shipped, exports/*.zip, and lean/**/.lake/
+       AGENTS.md               the contributor note below
+
+   Write this self-contained contributor note into AGENTS.md:
+
+       <!-- persistent-eclipse -->
+       ## Persistent Eclipse lab
+       This directory is a Persistent Eclipse research lab; its record is `.research/`.
+       Read `.research/MISSION.md` and `.research/SCOPE.md` for the objective and bounds,
+       `.research/STATUS.md` and `.research/notes/` for findings, and
+       `.research/labs/*/QUEUE.md` (or `.research/QUEUE.md`) for current work.
+       Read `.research/inbox/` for requests. To contribute, leave a Markdown file there
+       with the question or R-ID, your evidence, and what remains uncertain. Use a name
+       or stay anonymous. No installation or lab registration is needed.
+       Leave existing records and shared Git state to the manager. A worker follows
+       its assigned brief; opening this directory does not make you the manager.
+       <!-- /persistent-eclipse -->
+
+   In a repository that already has AGENTS.md, preserve unrelated instructions. Replace
+   an existing `persistent-eclipse` marker block with this note, or append it if absent;
+   do not duplicate it.
 
    The charter holds the source inventory, threat-model questions, scope and
    authority, origin, phase, and what still needs operator approval. A lab with one

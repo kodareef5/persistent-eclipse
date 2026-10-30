@@ -11,14 +11,17 @@ Git carries the research; `.research/inbox/` holds the conversation.
 
 ## Just contributing?
 
-Leave a Markdown file in inbox/ with your name, the question or R-ID, and your review,
-experiment, patch, or idea. You need no lab ID, registration, upgrade, or renaming.
-A current manager can credit and integrate your work, or reply with a question.
+Read MISSION.md and SCOPE.md for the objective and bounds. Leave a Markdown file in
+inbox/ with the question or R-ID, your review, experiment, patch, or idea, and the
+evidence and uncertainties. Use a name or stay anonymous. You need no installation,
+lab ID, registration, upgrade, or renaming. Leave existing records and shared Git
+state to the manager, who can integrate your work or reply with a question.
 
 Keep a short "Working here" paragraph in LAB.md so visitors can find their way:
 
-> Read notes/ and STATUS.md for findings, labs/*/QUEUE.md for current work, and
-> inbox/ for requests. Leave a contribution in inbox/ and say who it's from.
+> Read MISSION.md and SCOPE.md for the objective and bounds, notes/ and STATUS.md for
+> findings, labs/*/QUEUE.md (or QUEUE.md) for current work, and inbox/ for requests.
+> Leave evidence and open questions in inbox/. A name is optional.
 
 Older tools are welcome. If their linter doesn't understand newer IDs, see pe-lint;
 leave the existing notes intact.

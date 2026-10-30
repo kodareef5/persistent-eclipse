@@ -422,7 +422,10 @@ if (!draft && inbox !== undefined && existsSync(inbox)) {
   const today = new Date().toISOString().slice(0, 10);
   for (const file of readdirSync(inbox).filter((f) => f.endsWith(".md")).sort()) {
     const at = `inbox/${file}`, name = MESSAGE_RE.exec(file);
-    const fm = frontmatter(readFileSync(join(inbox, file), "utf8"));
+    const text = readFileSync(join(inbox, file), "utf8");
+    // Plain contributions need neither a registered sender nor routing metadata.
+    if (!text.startsWith("---\n")) continue;
+    const fm = frontmatter(text);
     if (name === null) advise(at, "name is not <yyyy-mm-dd>-<from lab>-<slug>.md");
     if (fm === undefined) { advise(at, "missing frontmatter block"); continue; }
     if (name !== null && fm.from !== name[2]) advise(at, `from "${fm.from}" does not match the name's lab "${name[2]}"`);

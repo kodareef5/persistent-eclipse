@@ -2270,7 +2270,7 @@
 
                   shasum -a 256 .research/tools/lint-notes.mjs
 
-              The shipped digest is `abf00e6fbb91dd4edf16772857b6b968cd6b8b7c5ef1c6660c35558f69763d3d`. `sha256sum` also works; on Windows use
+              The shipped digest is `d2172b35cc35c895c6e507d4287e9ffd2ed1a5ae338e892d75ebffd101418fc9`. `sha256sum` also works; on Windows use
               `certutil -hashfile .research/tools/lint-notes.mjs SHA256`. Don't ask an unknown
               script for its own hash by running it.
 
@@ -2777,7 +2777,10 @@
                 const today = new Date().toISOString().slice(0, 10);
                 for (const file of readdirSync(inbox).filter((f) => f.endsWith(".md")).sort()) {
                   const at = `inbox/${file}`, name = MESSAGE_RE.exec(file);
-                  const fm = frontmatter(readFileSync(join(inbox, file), "utf8"));
+                  const text = readFileSync(join(inbox, file), "utf8");
+                  // Plain contributions need neither a registered sender nor routing metadata.
+                  if (!text.startsWith("---\n")) continue;
+                  const fm = frontmatter(text);
                   if (name === null) advise(at, "name is not <yyyy-mm-dd>-<from lab>-<slug>.md");
                   if (fm === undefined) { advise(at, "missing frontmatter block"); continue; }
                   if (name !== null && fm.from !== name[2]) advise(at, `from "${fm.from}" does not match the name's lab "${name[2]}"`);
@@ -4019,14 +4022,17 @@
 
               ## Just contributing?
 
-              Leave a Markdown file in inbox/ with your name, the question or R-ID, and your review,
-              experiment, patch, or idea. You need no lab ID, registration, upgrade, or renaming.
-              A current manager can credit and integrate your work, or reply with a question.
+              Read MISSION.md and SCOPE.md for the objective and bounds. Leave a Markdown file in
+              inbox/ with the question or R-ID, your review, experiment, patch, or idea, and the
+              evidence and uncertainties. Use a name or stay anonymous. You need no installation,
+              lab ID, registration, upgrade, or renaming. Leave existing records and shared Git
+              state to the manager, who can integrate your work or reply with a question.
 
               Keep a short "Working here" paragraph in LAB.md so visitors can find their way:
 
-              > Read notes/ and STATUS.md for findings, labs/*/QUEUE.md for current work, and
-              > inbox/ for requests. Leave a contribution in inbox/ and say who it's from.
+              > Read MISSION.md and SCOPE.md for the objective and bounds, notes/ and STATUS.md for
+              > findings, labs/*/QUEUE.md (or QUEUE.md) for current work, and inbox/ for requests.
+              > Leave evidence and open questions in inbox/. A name is optional.
 
               Older tools are welcome. If their linter doesn't understand newer IDs, see pe-lint;
               leave the existing notes intact.
@@ -5438,6 +5444,26 @@
                  .research/lean/          durable proof projects and scripts (math)
                  .research/notes/
                  .research/.gitignore    scratch/, tools/*.shipped, exports/*.zip, and lean/**/.lake/
+                 AGENTS.md               the contributor note below
+
+             Write this self-contained contributor note into AGENTS.md:
+
+                 <!-- persistent-eclipse -->
+                 ## Persistent Eclipse lab
+                 This directory is a Persistent Eclipse research lab; its record is `.research/`.
+                 Read `.research/MISSION.md` and `.research/SCOPE.md` for the objective and bounds,
+                 `.research/STATUS.md` and `.research/notes/` for findings, and
+                 `.research/labs/*/QUEUE.md` (or `.research/QUEUE.md`) for current work.
+                 Read `.research/inbox/` for requests. To contribute, leave a Markdown file there
+                 with the question or R-ID, your evidence, and what remains uncertain. Use a name
+                 or stay anonymous. No installation or lab registration is needed.
+                 Leave existing records and shared Git state to the manager. A worker follows
+                 its assigned brief; opening this directory does not make you the manager.
+                 <!-- /persistent-eclipse -->
+
+             In a repository that already has AGENTS.md, preserve unrelated instructions. Replace
+             an existing `persistent-eclipse` marker block with this note, or append it if absent;
+             do not duplicate it.
 
              The charter holds the source inventory, threat-model questions, scope and
              authority, origin, phase, and what still needs operator approval. A lab with one

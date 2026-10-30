@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build cordis.patch.yml from src/, then test it in DSH and in Pi.
+# Build cordis.patch.yml from src/, then test it in DSH and Pi.
 # Usage: src/check.sh /path/to/dsh/apps/cli/lib/bin.js [path to pi]
 set -e
 cd "$(dirname "$0")/.."
