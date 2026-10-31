@@ -1154,8 +1154,8 @@ try {
   check(lifecycle.filter(e => e.event === 'session_start').length === lifecycle.filter(e => e.event === 'session_shutdown').length,
     'workers: every SDK session emits shutdown to installed extensions before disposal')
 
-  // Exercise the real footer while the manager is idle: four orbiting braille stacks whose
-  // colors drift with age, a freed middle slot, a failed worker, and the finished goal.
+  // Exercise the real footer while the manager is idle: four braille stacks whose colors ramp
+  // with age while one gap travels the row, a freed middle slot, a failed worker, and the finished goal.
   // Ages run 100 minutes in 3.3 s here.
   if (process.platform !== 'win32') {
     stage = 0
@@ -1199,13 +1199,13 @@ try:
             os.write(master, b'Read the fixture with four independent workers and a ten-round budget.\\r')
             sent = True
         slots = [s.split() for s in re.findall('Persistent Eclipse · ([⠀-⣿ ]+) [+]', text)]
-        first = {s[0] for s in slots if len(s) == 4 and s[0] != '⣀'}
-        orbiting = len(first) >= 4 and first <= set('⣾⣽⣻⢿⡿⣟⣯⣷')
+        running = [c for s in slots if len(s) == 4 for c in s if c not in '⣀⢀⡀⠀']
+        orbiting = len(set(running)) >= 4 and '⣿' in running
         colors = {m for m in re.findall(chr(27) + re.escape('[') + '([0-9;]*)m[⠀-⣿]', output.decode('utf-8', 'replace'))}
         middle_free = any(len(s) == 4 and s[1] == '⣀' and all(s[i] != '⣀' for i in [0, 2, 3]) for s in slots)
         finished = 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +3 !1' in text and 'goal complete' in text
         if orbiting and len(colors) >= 5 and middle_free and 'goal active' not in text and finished:
-            print('ok   workers and goals: real TUI shows orbiting braille stacks drifting through the age colors, stable slots, counts, and only a goal state that needs a look')
+            print('ok   workers and goals: real TUI shows braille stacks ramping through the age colors with a traveling gap, stable slots, counts, and only a goal state that needs a look')
             break
     else:
         raise RuntimeError('TUI footer did not update: ' + output.decode('utf-8', 'replace')[-8000:])
@@ -1219,9 +1219,9 @@ finally:
         child.wait()
     os.close(master)
 `
-    const ageFile = join(pkg, 'extension.ts'), unaged = readFileSync(ageFile, 'utf8')
-    check(unaged.includes('const AGE_FULL_MS = 100 * 60_000;'), 'workers: a worker cell blinks dark red at 100 minutes')
-    writeFileSync(ageFile, unaged.replace('const AGE_FULL_MS = 100 * 60_000;', 'const AGE_FULL_MS = 3300;'))
+    const ageFile = join(pkg, 'src', 'cells.mjs'), unaged = readFileSync(ageFile, 'utf8')
+    check(unaged.includes('export const AGE_FULL_MS = 100 * 60_000;'), 'workers: a worker cell blinks dark red at 100 minutes')
+    writeFileSync(ageFile, unaged.replace('export const AGE_FULL_MS = 100 * 60_000;', 'export const AGE_FULL_MS = 3300;'))
     let terminalOutput = '', code
     try {
       const probe = spawn('python3', ['-c', terminalProbe, pi, lab], {cwd: scratch, env: {...env, TERM: 'xterm-256color'}, stdio: ['ignore', 'pipe', 'pipe']})
@@ -1498,8 +1498,8 @@ finally:
       } finally { await f.close() }
 
       // A full fleet stays quiet until a worker turns red; ages run 100 minutes in 600 ms here.
-      const young = readFileSync(extensionFile, 'utf8')
-      writeFileSync(extensionFile, young.replace('const AGE_FULL_MS = 100 * 60_000;', 'const AGE_FULL_MS = 600;'))
+      const cellsFile = join(pkg, 'src', 'cells.mjs'), young = readFileSync(cellsFile, 'utf8')
+      writeFileSync(cellsFile, young.replace('export const AGE_FULL_MS = 100 * 60_000;', 'export const AGE_FULL_MS = 600;'))
       try {
         const red = await fixture({workers: 3})
         try {
@@ -1509,7 +1509,7 @@ finally:
             /footer (red|dark red|blinking dark red): inspect it/.test(text),
             'idle review: a red worker wakes a full fleet and is named for inspection')
         } finally { await red.close() }
-      } finally { writeFileSync(extensionFile, young) }
+      } finally { writeFileSync(cellsFile, young) }
       for (const config of [{workers: 3}, {workers: 1, slots: 2}, {goal: false}]) {
         const f = await fixture(config)
         try {

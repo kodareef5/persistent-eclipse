@@ -42,7 +42,7 @@ YAML used by DSH and Pi. No separate renderer is needed.
 
 Pi checks its package at startup, hourly, and on `/pe-version`. It compares SHA-256
 hashes of `extension.ts`, `cordis.patch.yml`, `package.json`, and the imported history,
-retry, and integrity modules with their installed Git commit. It fetches the package's
+retry, integrity, and footer-cell modules with their installed Git commit. It fetches the package's
 `origin/main` to distinguish an available update from local or divergent commits.
 Changed files, unavailable verification, and updates show a notification and a short
 footer notice. An installation updated while Pi is running requests a reload; it
@@ -83,9 +83,11 @@ session. It preserves the completed count, task IDs, and all files. This is flee
 list cleanup; disk cleanup remains a separate housekeeping task.
 
 Pi's footer gives each worker slot a cell: a dim ⣀ when free, and for a running worker
-a full braille stack with one gap circling it (⣾⣽⣻⢿⡿⣟⣯⣷), so a live worker visibly
-moves. Its color drifts smoothly through light yellow, blue, green, orange, red, and
-dark red, about 16.7 minutes each, and blinks dark red from 100 minutes. A terminal
-cell has one color, so the drift colors the whole stack rather than single dots.
+a full braille stack whose color ramps smoothly through light yellow, blue, green,
+orange, red, and dark red, about 16.7 minutes each, and blinks dark red from 100
+minutes. One two-dot gap travels the whole row on a shared clock: up and around each
+running cell from its bottom-left, across each free cell's two dots, then a short rest
+before it starts again. `src/cells.mjs` holds this; `node src/preview-cells.mjs
+--fast` previews it in a terminal, with the color ramp sped up.
 The fleet list and fleet checks name red and blinking workers for the manager, which
 cannot see the footer, and ask it to inspect them; age alone is not failure.

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { indexSession, captureSearch, scheduleReport } from "./src/history.mjs";
 import { installRetry } from "./src/retry-pi.ts";
 import { createIntegrityCheck } from "./src/integrity.mjs";
+import { row, tint, age, ageNote, AGE_INSPECT, STEP_MS } from "./src/cells.mjs";
 import { Type, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, VERSION,
 	type AgentSession, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -37,9 +38,9 @@ Load a skill by reading its file.
   the subject and spell out ambiguous acronyms. It uses the operator's OpenRouter key
   and returns raw excerpts; read and judge them yourself. Fetch known URLs directly;
   pe-web has other search routes and what to ask for when search is unavailable.
-- Each running worker's footer cell is a braille stack with one gap circling it.
-  Its color drifts from light yellow through blue, green, and orange to red after
-  about 67 minutes, then dark red, and blinks dark red from 100. The operator watches those
+- Each running worker's footer cell is a braille stack whose color ramps from light
+  yellow through blue, green, and orange to red after about 67 minutes, then dark
+  red, and blinks dark red from 100. The operator watches those
   colors: inspect red and blinking workers with pe_list_agents, their scratch, or
   pe_send_message, to be sure they're making progress. Age alone isn't failure;
   stop a worker only when it is stuck or no longer useful.
@@ -222,23 +223,6 @@ type Goal = {
 	id: string; revision: number; objective: string; phase: "active" | "paused" | "blocked" | "complete";
 	roundsStarted: number; maxGoalRounds: number; blockedReason?: { code: string; message: string };
 };
-// A running worker's footer cell: a full braille stack with one gap circling it, while
-// its color drifts through the ages below. From 100 minutes it blinks dark red.
-const AGE_FULL_MS = 100 * 60_000;
-const AGES = ["light yellow", "blue", "green", "orange", "red", "dark red"] as const;
-const AGE_INSPECT = AGES.indexOf("red"); // From here the manager should look at the worker.
-const ORBIT = "⣾⣽⣻⢿⡿⣟⣯⣷", ORBIT_MS = 150; // The gap runs down the left side and up the right.
-const age = (ms: number) => {
-	const at = Math.max(0, ms) / AGE_FULL_MS * AGES.length;
-	return { stage: Math.min(AGES.length, Math.floor(at)), at };
-};
-const ageLabel = (ms: number) => {
-	const { stage } = age(ms);
-	return stage >= AGES.length ? "blinking dark red" : AGES[stage];
-};
-// What the fleet list and checks say about a running worker the operator sees as red.
-const ageNote = (ms: number) => age(ms).stage >= AGE_INSPECT
-	? `; footer ${ageLabel(ms)}: inspect it to be sure it is making progress` : "";
 const elapsed = (start: number, end = Date.now()) => {
 	const s = Math.floor((end - start) / 1000);
 	return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -656,23 +640,12 @@ Briefly check whether these experiments are still useful and whether an independ
 			// Show the limit, or more while workers started under a higher limit finish.
 			const shown = Math.max(slots, ...live.map((j) => j.slot + 1));
 			const light = theme.appearance === "light";
-			// Light yellow, blue, green, orange, red, dark red, and the final blinking dark red.
-			const palette = (light
-				? [[176, 138, 0], [35, 105, 215], [20, 140, 60], [215, 110, 0], [200, 40, 30], [150, 20, 20], [120, 0, 0]]
-				: [[255, 232, 140], [77, 163, 255], [90, 205, 120], [255, 160, 60], [240, 80, 70], [185, 40, 40], [150, 10, 10]]);
-			// Each color blends into the next over its stretch of the worker's age.
-			const tint = (at: number) => {
-				const i = Math.min(Math.floor(at), palette.length - 1), f = Math.min(at - i, 1), next = palette[Math.min(i + 1, palette.length - 1)];
-				const [r, g, b] = palette[i].map((c, k) => Math.round(c + (next[k] - c) * f));
-				return { kind: "rgb" as const, r, g, b };
-			};
-			const cells = Array.from({ length: shown }, (_, slot) => slot).map((slot) => {
-				const job = live.find((j) => j.slot === slot);
-				if (!job) return theme.fg("dim", "⣀");
-				const { stage, at } = age(now - job.started);
-				const glyph = ORBIT[Math.floor((now - job.started) / ORBIT_MS) % ORBIT.length];
-				if (stage >= AGES.length && Math.floor(now / 600) % 2) return theme.fg("dim", glyph);
-				return theme.style(glyph, { fg: tint(at) });
+			// One shared clock moves a two-dot gap along the row; colors ramp with age (src/cells.mjs).
+			const starts = Array.from({ length: shown }, (_, slot) => live.find((j) => j.slot === slot)?.started ?? null);
+			const cells = row(now, starts).map((c) => {
+				if (c.free || c.off) return theme.fg("dim", c.glyph);
+				const [r, g, b] = tint(c.at, light);
+				return theme.style(c.glyph, { fg: { kind: "rgb", r, g, b } });
 			}).join(" ");
 			const done = [...jobs.values()].filter((j) => j.status === "completed").length;
 			const failed = [...jobs.values()].filter((j) => j.status === "failed").length;
@@ -695,7 +668,7 @@ Briefly check whether these experiments are still useful and whether an independ
 			if (integrityLabel) parts.push(theme.fg("warning", integrityLabel));
 			ui.setStatus("persistent-eclipse", parts.join(" · "));
 		}
-		if (ui && live.length && !ticker) ticker = setInterval(refresh, ORBIT_MS);
+		if (ui && live.length && !ticker) ticker = setInterval(refresh, STEP_MS);
 		if ((!ui || !live.length) && ticker) { clearInterval(ticker); ticker = undefined; }
 	}
 	function sync(ctx: ExtensionContext) {
