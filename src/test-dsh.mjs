@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 const bin = process.argv[2]
 if (!bin) { console.error('usage: node src/test-dsh.mjs <dsh bin.js>'); process.exit(2) }
 const patch = join(dirname(fileURLToPath(import.meta.url)), '..', 'cordis.patch.yml')
-const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team'].map(mode => [mode,
+const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode,
   readFileSync(join(dirname(patch), 'src', 'missions', mode + '.md'), 'utf8')]))
 const home = mkdtempSync(join(tmpdir(), 'pe-boot-'))
 const lab = mkdtempSync(join(tmpdir(), 'pe-lab-'))
@@ -69,6 +69,9 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                       const inLab = await names(${JSON.stringify(lab)})
                       const outside = await names(${JSON.stringify(notLab)})
                       const body = (await reg.get('pe-reader', { cwd: ${JSON.stringify(lab)}, scope }))?.content ?? ''
+                      const math = await reg.get('pe-math', { cwd: ${JSON.stringify(lab)}, scope })
+                      const base = math?.resourceBase?.kind === 'directory' ? math.resourceBase.path : null
+                      const lean = base && fs.existsSync(base + '/notes/tools.lean.md') ? fs.readFileSync(base + '/notes/tools.lean.md', 'utf8') : null
                       coldResult ??= await coldStart()
                       await names(${JSON.stringify(drift)})
                       if (!${inspectMission} && !historyWorker) {
@@ -91,7 +94,7 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                         mission = {initial, persisted}
                       }
                       const kickoff = (await reg.get('pe-kickoff', { cwd: ${JSON.stringify(notLab)}, scope }))?.content ?? null
-                      fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ inLab, outside, cold: coldResult, mission, kickoff, heading: body.match(/^# .*/m)?.[0] ?? null }))
+                      fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ inLab, outside, cold: coldResult, mission, kickoff, heading: body.match(/^# .*/m)?.[0] ?? null, lean, mathNotes: math?.content?.includes('notes/tools.lean.md') ?? false }))
                     } catch (e) { fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ error: e.stack })) }
                     globalThis.setTimeout(tick, 1000)
                   }
@@ -167,7 +170,7 @@ child.stderr.on('data', d => { stderr += d })
 
 const want = ['pe-challenger', 'pe-dead-end', 'pe-fleet', 'pe-git-research', 'pe-intel',
   'pe-cvss', 'pe-lint', 'pe-migrator', 'pe-muse', 'pe-coderunner', 'pe-reader',
-  'pe-reporter', 'pe-survey', 'pe-patch', 'pe-math', 'pe-web', 'pe-export', 'pe-sync', 'pe-layered-challenge', 'pe-history', 'pe-models', 'pe-model-notes'].sort()
+  'pe-reporter', 'pe-status-report', 'pe-survey', 'pe-patch', 'pe-math', 'pe-web', 'pe-export', 'pe-sync', 'pe-layered-challenge', 'pe-history', 'pe-models', 'pe-model-notes', 'pe-hunt', 'pe-osint', 'pe-forecast', 'pe-judge'].sort()
 const read = file => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null } }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -191,7 +194,7 @@ const placed = (dir, name) => {
   const source = join(dirname(patch), 'src', name)
   return existsSync(file) && readFileSync(file).equals(readFileSync(source))
 }
-const toolsPlaced = () => placed(lab, 'lint-notes.mjs') && placed(lab, 'cvss.mjs') && placed(lab, 'pack.mjs') && placed(lab, 'history.mjs')
+const toolsPlaced = () => placed(lab, 'lint-notes.mjs') && placed(lab, 'cvss.mjs') && placed(lab, 'pack.mjs') && placed(lab, 'history.mjs') && placed(lab, 'status-report.mjs') && placed(lab, 'ledger.mjs')
   && placed(join(cold, 'pe-boot-probe-manager'), 'lint-notes.mjs') && placed(join(cold, 'pe-boot-probe-manager'), 'cvss.mjs')
 const toolsKept = () => !existsSync(join(notLab, '.research'))
 
@@ -228,6 +231,10 @@ try {
   await until('kickoff carries all three mission texts verbatim', () => {
     const body = read(manager)?.kickoff ?? ''
     return body.includes('## The mission') && Object.values(missions).every(m => body.includes(m))
+  })
+  await until('notes: a skill names its field notes, and they sit in its resource folder byte for byte', () => {
+    const r = read(manager)
+    return r?.mathNotes && r.lean === readFileSync(join(dirname(patch), 'src', 'skills', 'math', 'tools.lean.md'), 'utf8').trimEnd() + '\n'
   })
   await until('tools: the lab gets the linter, calculator, and packer, byte for byte', toolsPlaced)
   // A lab keeps the copy its record was built with. The runtime may never replace it, and

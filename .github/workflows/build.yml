@@ -1,5 +1,5 @@
-# Build cordis.patch.yml from src/, test it in Pi, and keep main in
-# sync: a push that changes src/ gets the rebuilt cordis.patch.yml committed
+# Build cordis.patch.yml and dsh-client.js from src/, test in Pi, and keep main in
+# sync: a push that changes src/ gets the rebuilt files committed
 # back. A push that edits a generated file by hand, so it no longer matches src/, fails
 # instead of being overwritten. Run it by hand with `gh workflow run build.yml`.
 # DSH is not public, so src/check.sh remains the local check for it.
@@ -20,7 +20,7 @@ concurrency:
   group: build-${{ github.ref }}
 
 env:
-  GENERATED: cordis.patch.yml
+  GENERATED: cordis.patch.yml dsh-client.js
 
 jobs:
   build:
@@ -67,7 +67,7 @@ jobs:
       - name: Test
         run: |
           for t in cvss lint pack; do echo "-- $t"; node src/test-$t.mjs; done
-          for t in history integrity retry; do echo "-- $t"; node --test src/test-$t.mjs; done
+          for t in cells history integrity retry; do echo "-- $t"; node --test src/test-$t.mjs; done
           echo "-- pi"; node src/test-pi.mjs pi
 
       - name: Commit the rebuilt files

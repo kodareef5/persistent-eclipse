@@ -135,6 +135,12 @@ Divide and conquer is the default. Check others' claims and take a different
 promising lead; several labs piling onto the same spot wastes the breadth we have.
 A deliberate independent attempt is welcome, but say that's what you're doing.
 
+Different results are worth investigating. Keep each lab's conclusion, evidence,
+and reasoning attributed; compare what each actually checked. Use linked notes and
+the inbox to work through the discrepancy, not to demand agreement. Explain what
+new evidence settled and keep remaining dissent visible. A peer's negation can be
+wrong too: revisit it when a plausible detour or missing check earns another look.
+
 Include `.research/activity/` receipts in ordinary research commits. They let
 pe-history report the labs' collective effort without sharing transcripts.
 `node .research/tools/history.mjs report --write` refreshes receipts before a
@@ -164,6 +170,7 @@ on distinct IDs before continuing the merge.
 | --- | --- |
 | Notes and runs | The owning lab edits them. Send a correction or write a linked note that supports or refutes theirs. |
 | `labs/<lab>/` | Each lab maintains its own folder. |
+| `status-reports/`, `SUMMARY.md` | A lab writes each report once. SUMMARY.md incorporates each report; pe-status-report says how to handle two at once. Never union-merge it. |
 | `intel/INDEX.md`, `RUNS.md`, `FEEDBACK.md`, `LABELS.md` | Append; use the union merge rules below. |
 | STATUS, FRONTIER, MAP, SOURCES, MISSION, SCOPE, LAB | Pull before editing, keep edits focused, and preserve others' facts. |
 

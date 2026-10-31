@@ -1,0 +1,5 @@
+# Installed as a DSH package, Persistent Eclipse also adds its web UI: the pill under the
+# composer (dsh-client.js). Kept apart so cordis.patch.yml works as a plain patch layer too.
+- insert:
+    - id: persistent-eclipse-ui
+      name: persistent-eclipse

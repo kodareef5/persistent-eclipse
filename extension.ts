@@ -1,15 +1,15 @@
 // Pi and DSH share the persona and skills in cordis.patch.yml.
 // LAB.md enables lab tools, workers, and goals; elsewhere only /pe is available.
-import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { indexSession, captureSearch, scheduleReport } from "./src/history.mjs";
 import { installRetry } from "./src/retry-pi.ts";
 import { createIntegrityCheck } from "./src/integrity.mjs";
-import { row, tint, age, ageNote, AGE_INSPECT, STEP_MS } from "./src/cells.mjs";
+import { labRoot, labFile, localConfig, syncTarget, mailbox, quietly, DISK_EVERY, size, freeSpace } from "./src/lab-status.mjs";
+import { row, tint, age, ageNote, AGE_INSPECT, STEP_MS, IDLE_MS } from "./src/cells.mjs";
 import { Type, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, VERSION,
 	type AgentSession, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -41,19 +41,32 @@ Load a skill by reading its file.
 - Each running worker's footer cell is a braille stack whose color ramps from light
   yellow through blue, green, and orange to red after about 67 minutes, then dark
   red, and blinks dark red from 100. The operator watches those
-  colors: inspect red and blinking workers with pe_list_agents, their scratch, or
-  pe_send_message, to be sure they're making progress. Age alone isn't failure;
-  stop a worker only when it is stuck or no longer useful.
+  colors: inspect red workers with pe_list_agents, their scratch, or pe_send_message
+  to be sure they're making progress. A steer waits for the worker's current command;
+  \`interrupt\` stops that command so it reads you now. Age alone isn't failure; stop
+  a worker only when it is stuck or no longer useful. Workers ask before runs over an
+  hour; say so in the brief when one may take longer.
 - The footer shows worker slots and completions, inbox messages received (✉ ↓) and
-  sent (↑), the lab remote's size and commits to pull (+), and disk use; every few
+  sent (↑), the lab remote's size and commits to pull (⎇ +), and disk use (⛁); every few
   minutes the name scrolls lab news. Pi measures every ten minutes and fetches when
   sync is enabled. You handle pulls, merges, and pushes.
-- During goals, a housekeeping reminder arrives every six hours. The operator can
-  change \`Housekeeping: <n>h\` or set it to \`off\` in LAB.md.
+- During goals, a housekeeping check arrives every six hours: a chance to come up for
+  air, tidy, and reevaluate. The operator can change \`Housekeeping: <n>h\` or set it
+  to \`off\` in LAB.md. Housekeeping and a completed goal each file a lab status report
+  for the operator (pe-status-report).
+- When you finish a reply during an armed goal while workers run, a fresh-context
+  reviewer may offer one short, mission-aware reaction. It uses your model and effort,
+  has no tools, and can agree that waiting is appropriate. If you've moved on, it
+  arrives after your current tool call. Treat it as advice, not an operator instruction. Reviews are at least fifteen minutes apart; \`Idle review: off\`
+  in LAB.md disables them.
+- Between worker results, keep the lab moving in short stretches you can drop when a
+  worker needs you: read recent notes and other labs' work, check the queue, run a web
+  search, or steer a worker with a fresh idea.
 - During an armed goal, fifteen idle minutes with workers running and at least two
-  free slots trigger a brief fleet check. It uses no goal round. Review worker ages
-  and activity, then investigate, delegate, or keep waiting; empty slots need no made-up work.
-  While you keep waiting, checks slow to every 30 minutes, then hourly.
+  free slots, or a red worker, bring a brief fleet check naming any red workers. It
+  never interrupts a turn and uses no goal round. Investigate, delegate, or keep
+  waiting; empty slots need no made-up work. While you keep waiting, checks slow to
+  every 30 minutes, then hourly.
 - The lab runs while Pi runs; there is no scheduling heartbeat. Use \`rg\` in
   \`bash\` for grep/glob tasks, and use only tools Pi lists.
 - Use \`/pe [request]\` to start or continue a lab, and \`/goal\` to steer goals.`;
@@ -62,6 +75,9 @@ const GOAL_ENTRY = "pe-goal";
 const DEFAULT_ROUNDS = 256;
 const BLOCKED_AFTER = 3;
 const IDLE_REVIEW_MS = 15 * 60_000;
+const IDLE_REACTION_MS = 15 * 60_000;
+// Room for the reviewer's reasoning; the reaction itself stays short.
+const REACTION_TOKENS = 16_000;
 // Each check the manager waits through doubles the next interval, up to four times.
 const idleDelay = (waited: number) => IDLE_REVIEW_MS * 2 ** Math.min(waited, 2);
 const GOAL_POLICY = `create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed. When a human asks to continue or resume a disarmed, paused, or blocked goal, in any wording or language, use update_goal action resume. Mark complete only when the objective is actually achieved. Mark blocked only after the same blocking condition persists for at least ${BLOCKED_AFTER} consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.`;
@@ -69,6 +85,7 @@ const GOAL_POLICY = `create_goal may infer goal intent from a direct human reque
 type Skill = { name: string; description: string; filePath: string; baseDir: string };
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
+const idleReviewPrompt = readFileSync(join(packageRoot, "src/idle-review.md"), "utf8");
 const checkIntegrity = createIntegrityCheck(packageRoot);
 const yml = readFileSync(join(packageRoot, "cordis.patch.yml"), "utf8");
 const historyMeta = { runtimeVersion: VERSION, node: process.version, harnessVersion: JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8")).version,
@@ -104,12 +121,22 @@ const defaultMission = literal(at(/^\s+mission: \|$/));
 // Each entry under `skills:` is a name line, a JSON description, and a content block.
 // The kickoff body has its own key, and its description is in the line that registers it.
 const indent = (line: string) => line.search(/\S/);
-const entries: { name: string; description: string; body: string }[] = [];
+// A skill's field notes follow its content under `notes:`, one literal block per file.
+const entries: { name: string; description: string; body: string; notes?: Record<string, string> }[] = [];
 const top = at(/^\s+skills:$/) + 1;
 for (let i = top; i < lines.length && (!lines[i].trim() || indent(lines[i]) >= indent(lines[top])); i++) {
 	if (indent(lines[i]) !== indent(lines[top])) continue;
 	const description = JSON.parse(lines[i + 1].trim().slice("description: ".length));
-	entries.push({ name: lines[i].trim().slice(0, -1), description, body: literal(i + 2) });
+	const notes: Record<string, string> = {};
+	for (let j = i + 2; j < lines.length && (!lines[j].trim() || indent(lines[j]) > indent(lines[top])); j++) {
+		if (lines[j].trim() !== "notes:" || indent(lines[j]) !== indent(lines[i + 1])) continue;
+		for (let k = j + 1; k < lines.length && (!lines[k].trim() || indent(lines[k]) > indent(lines[j])); k++) {
+			const file = indent(lines[k]) === indent(lines[j]) + 2 && /^\s+([A-Za-z0-9][A-Za-z0-9.-]*\.(?:md|mjs)): \|$/.exec(lines[k])?.[1];
+			if (file) notes[file] = literal(k);
+		}
+		break;
+	}
+	entries.push({ name: lines[i].trim().slice(0, -1), description, body: literal(i + 2), ...(Object.keys(notes).length ? { notes } : {}) });
 }
 const register = yml.match(/name: 'pe-kickoff', description: ("(?:[^"\\]|\\.)*")/);
 if (!register) throw new Error("cordis.patch.yml does not register pe-kickoff");
@@ -119,39 +146,24 @@ entries.push({ name: "pe-kickoff", description: JSON.parse(register[1]), body: l
 // source frontmatter is not always valid YAML.
 const root = join(tmpdir(), `persistent-eclipse-${createHash("sha256").update(yml).digest("hex").slice(0, 12)}`);
 function skills(): Skill[] {
-	return entries.map(({ name, description, body }) => {
+	return entries.map(({ name, description, body, notes }) => {
 		const baseDir = join(root, name);
 		const filePath = join(baseDir, "SKILL.md");
 		if (!existsSync(filePath)) {
 			mkdirSync(baseDir, { recursive: true });
 			const text = body.replace(/^---\n[\s\S]*?\n---\n/, "");
+			// Notes first, so a skill file that exists always has its notes beside it.
+			for (const [file, note] of Object.entries(notes ?? {})) {
+				mkdirSync(join(baseDir, "notes"), { recursive: true });
+				writeFileSync(join(baseDir, "notes", file), note);
+			}
 			writeFileSync(filePath, `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n${text}`);
 		}
 		return { name, description, filePath, baseDir };
 	});
 }
 
-function labRoot(cwd: string): string | undefined {
-	for (let d = resolve(cwd); ; d = dirname(d)) {
-		if (existsSync(join(d, ".research", "LAB.md"))) return realpathSync(d);
-		if (d === dirname(d)) return;
-	}
-}
-
 const inLab = (cwd: string) => !!labRoot(cwd);
-const labFile = (lab: string) => {
-	const file = join(lab, ".research", "LAB.md");
-	return existsSync(file) ? readFileSync(file, "utf8") : "";
-};
-// This clone's own settings, which a shared lab cannot keep in LAB.md: pe.lab, pe.workers.
-function localConfig(lab: string): Map<string, string> {
-	try {
-		const out = execFileSync("git", ["config", "--get-regexp", "^pe\\."], { cwd: lab, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
-		return new Map(out.split("\n").filter(Boolean).map((line) => [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)]));
-	} catch {
-		return new Map(); // no matching keys, or no repository
-	}
-}
 // Pi's worker concurrency is lab policy: `Workers: <n>` in LAB.md, or this clone's
 // `git config pe.workers`, read at each launch.
 const DEFAULT_WORKERS = 4, MAX_WORKERS = 16;
@@ -162,44 +174,6 @@ function workerLimit(cwd: string): number {
 	const m = /^[ \t]*Workers:[ \t]*(\d+)[ \t]*$/m.exec(labFile(lab));
 	const n = local >= 1 ? local : m ? Number(m[1]) : DEFAULT_WORKERS;
 	return Math.min(MAX_WORKERS, Math.max(1, Math.floor(n)));
-}
-// The remote and branch a lab shares: `Sync: <remote> [<branch>]` in LAB.md, origin and
-// main by default, none when off. Git's own upstream never decides it.
-function syncTarget(lab: string): { remote: string; branch: string } | undefined {
-	// Each policy is one LAB.md line; `[ \t]` never reads into the next one.
-	const m = /^[ \t]*Sync:[ \t]*([^\s(]+)(?:[ \t]+([^\s(]+))?/m.exec(labFile(lab));
-	const remote = m?.[1] ?? "origin", branch = m?.[2] ?? "main";
-	if (remote.toLowerCase() === "off") return;
-	try {
-		execFileSync("git", ["remote", "get-url", remote], { cwd: lab, timeout: 2000, stdio: "ignore" });
-		return { remote, branch };
-	} catch {
-		return;
-	}
-}
-// Inbox messages to this lab, or to all, from other labs (how many still open), and
-// messages this lab sent.
-function mailbox(lab: string, here: string | undefined) {
-	const box = { received: 0, open: 0, sent: 0 };
-	const dir = join(lab, ".research", "inbox");
-	if (!here || !existsSync(dir)) return box;
-	for (const file of readdirSync(dir).filter((f) => f.endsWith(".md"))) {
-		const head = /^---\n([\s\S]*?)\n---/.exec(readFileSync(join(dir, file), "utf8"))?.[1] ?? "";
-		const field = (key: string) => new RegExp(`^${key}:\\s*(.*)$`, "m").exec(head)?.[1].trim() ?? "";
-		const to = field("to").replace(/^\[|\]$/g, "").split(",").map((t) => t.trim());
-		if (field("from") === here) box.sent++;
-		else if (to.includes(here) || to.includes("all")) {
-			box.received++;
-			if (field("state") === "open") box.open++;
-		}
-	}
-	return box;
-}
-// Run background git and du at low priority, without a terminal or Git credential prompts.
-const QUIET = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
-function quietly(cmd: string, args: string[], cwd: string, done: (out: string) => void) {
-	const [file, argv] = process.platform === "win32" ? [cmd, args] : ["nice", ["-n", "19", cmd, ...args]];
-	execFile(file, argv, { cwd, env: QUIET, timeout: 60_000, detached: true, windowsHide: true }, (_error, stdout) => done(String(stdout ?? "")));
 }
 // What a run's prompt depends on: whether this is a lab, and its recorded mission.
 function labState(cwd: string): string {
@@ -242,32 +216,43 @@ const span = (ms: number) => {
 	const [n, unit] = ms >= 3_600_000 ? [Math.round(ms / 360_000) / 10, "hour"] : ms >= 60_000 ? [Math.round(ms / 60_000), "minute"] : [Math.round(ms / 1000), "second"];
 	return `${n} ${unit}${n === 1 ? "" : "s"}`;
 };
-const housekeepingPrompt = (every: number, disk: string) => `<housekeeping>
-It's been about ${span(every)}. When there's a good pause:
+// Lab tools whose shipped version, left beside them as `.shipped`, differs.
+function waitingTools(lab: string): string[] {
+	const dir = join(lab, ".research", "tools");
+	try {
+		return readdirSync(dir).filter((f) => f.endsWith(".shipped")).map((f) => f.slice(0, -".shipped".length))
+			.filter((name) => { try { return readFileSync(join(dir, name), "utf8") !== readFileSync(join(dir, `${name}.shipped`), "utf8"); } catch { return false; } });
+	} catch {
+		return [];
+	}
+}
+const housekeepingPrompt = (every: number, disk: string, tools: string[]) => `<housekeeping>
+It's been about ${span(every)}: a sanity check. At a good pause, come up for air.
+Clear your head and reevaluate: is the lab still chasing the most useful question?
 - Tidy finished scratch work and update the task list and lab notes. The lab folder uses ${disk || "an unmeasured amount of disk"}. Keep anything still in use, cited, or waiting to be saved; pe-fleet has cleanup details. Commit loose ends and sync if enabled.
 - Use pe_archive_agents to remove eligible old completed workers from the fleet list; this preserves their artifacts and history.
+${tools.length ? `- Lab tools differ from runtime copies: ${tools.join(", ")} (a \`.shipped\` copy beside each). Compare versions before replacing anything; the runtime copy may be older. See pe-fleet.\n` : ""}- File a lab status report for the operator with pe-status-report, and commit it.
 - Is there an idea we dismissed too quickly? Give one or two to a fresh reader who goes back to the source or proof. Leave room for new work too.
 - If it's been a while, try pe-muse or a web round. Follow a promising angle with a researcher.
-Then get back to the question you're chasing.
+Then go back to the question you choose.
 </housekeeping>`;
+// When a goal completes, the lab reports to the operator: pe-status-report.
+const REPORT_PROMPT = `<status_report>
+The goal is complete. File this lab's status report for the operator with pe-status-report.
+It is filed once committed, and pushed when sync is on.
+</status_report>`;
 
-// Disk use in the footer: the whole lab folder, sources and scratch included.
-const DISK_EVERY = 10 * 60_000, LOW_FREE = 20 * 2 ** 30;
-const size = (bytes: number) => {
-	let v = bytes / 1024, i = 0;
-	while (v >= 1024 && i < 3) { v /= 1024; i++; }
-	return `${v < 10 && i ? v.toFixed(1) : Math.round(v)}${"KMGT"[i]}`;
-};
 // The footer's name rests, and every few minutes becomes a news ticker: each headline
 // slides through the name's width, then the name rests a few seconds before the next.
 const NAME = "Persistent Eclipse", NEWS_GAP = "   ", NEWS_MAX = 64;
-const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120;
+// Every three minutes while the manager works; between turns, at most every ten.
+const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120, NEWS_IDLE_REST = 10 * 60_000;
 const result = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
 type Job = {
 	id: string; slot: number; skill: string; task: string; mission: string; folder: string; started: number; ended?: number;
 	model: NonNullable<ExtensionContext["model"]>; thinkingLevel?: ExtensionContext["thinkingLevel"];
-	status: "running" | "completed" | "failed" | "cancelled"; activity: string;
-	archived?: boolean;
+	status: "running" | "completed" | "failed" | "cancelled"; activity: string; since: number;
+	archived?: boolean; nudge?: string;
 	stop?: string; session?: AgentSession; messages: string[]; work: Promise<void>;
 };
 
@@ -277,7 +262,7 @@ function placeTools(cwd: string): void {
 	const lab = labRoot(cwd);
 	if (!lab) return;
 	const dir = join(lab, ".research", "tools");
-	const shipped: [string, string][] = [["lint-notes.mjs", "pe-lint"], ["cvss.mjs", "pe-cvss"], ["pack.mjs", "pe-export"], ["history.mjs", "pe-history"]];
+	const shipped: [string, string][] = [["lint-notes.mjs", "pe-lint"], ["cvss.mjs", "pe-cvss"], ["pack.mjs", "pe-export"], ["history.mjs", "pe-history"], ["status-report.mjs", "pe-status-report"], ["ledger.mjs", "pe-forecast"]];
 	for (const [name, skill] of shipped) {
 		const body = entries.find((e) => e.name === skill)?.body.match(new RegExp("```js " + name + "\\n([\\s\\S]*?)^```", "m"))?.[1];
 		if (body === undefined) continue;
@@ -331,9 +316,12 @@ export default function (pi: ExtensionAPI) {
 	let started = false;
 	let generation = 0;
 	let ui: ExtensionContext["ui"] | undefined;
-	let ticker: ReturnType<typeof setInterval> | undefined;
+	let ticker: ReturnType<typeof setInterval> | undefined, tickerEvery = 0;
+	// Motion only while the manager works, as the screen is changing then anyway. Between
+	// turns the footer stands still, so selecting and copying in the terminal keep working.
+	let busy = false, shownStatus: string | undefined, idleNews = 0;
 	let integrityTimer: ReturnType<typeof setInterval> | undefined;
-	let integrityLabel = "", integrityNotice = "";
+	let integrityLabel = "", integrityNotice = "", reloadTold = false;
 	let integrityBusy: Promise<void> | undefined;
 	function inspectPlugin(ctx: ExtensionContext, explicit = false): Promise<void> {
 		if (integrityBusy) return integrityBusy.then(() => inspectPlugin(ctx, explicit));
@@ -342,6 +330,12 @@ export default function (pi: ExtensionAPI) {
 			const report = await checkIntegrity();
 			if (epoch !== generation) return;
 			integrityLabel = report.label;
+			// Tell the manager once: the operator sees the footer, the manager does not.
+			if (report.reload && !reloadTold) {
+				reloadTold = true;
+				pi.sendMessage({ customType: "pe-update", display: true, content: `PE: the installed Persistent Eclipse changed since this session loaded it (${report.loaded.commit?.slice(0, 7) ?? "unversioned"} → ${report.installed.commit?.slice(0, 7) ?? "unversioned"}), so a reload is needed. A reload stops running workers. At a good pause, wind down as pe-fleet's "Updating tools and the runtime" describes: no new long workers, ask running ones to save their progress, commit, then ask the operator to reload.` },
+					{ deliverAs: "nextTurn" });
+			}
 			if (explicit || report.summary !== integrityNotice)
 				ctx.ui.notify(explicit ? report.detail : report.summary, report.warning ? "warning" : "info");
 			integrityNotice = report.summary;
@@ -362,8 +356,12 @@ export default function (pi: ExtensionAPI) {
 	let seen = ""; // The lab and mission the current run's prompt was built from.
 	const jobs = new Map<string, Job>();
 	let slots = DEFAULT_WORKERS; // The lab's worker limit as last read.
-	let tidied = 0; // When the goal was armed or last reminded to tidy up.
+	let tidied = 0; // When the session last reminded the manager to tidy up, or first set a goal.
 	let idleReview: ReturnType<typeof setTimeout> | undefined;
+	let wakeManager: (() => void) | undefined;
+	let reactionAbort: AbortController | undefined;
+	let reactionWork: Promise<void> | undefined;
+	const cancelReaction = () => reactionAbort?.abort();
 	let waited = 0; // Fleet checks since a worker launched or finished or the operator spoke.
 	const disk = { lab: "", text: "", low: false, at: 0, busy: false }; // The lab's size, as last measured.
 	// Session hooks and the background timer request measurements, at most every ten minutes.
@@ -378,13 +376,9 @@ export default function (pi: ExtensionAPI) {
 			const kb = Number(stdout.split(/\s/)[0]);
 			if (disk.lab !== lab || !(kb >= 0) || !stdout.trim()) return;
 			disk.text = size(kb * 1024);
-			try {
-				const fs = statfsSync(lab), free = fs.bavail * fs.bsize;
-				disk.low = free < LOW_FREE || free < fs.blocks * fs.bsize * 0.1;
-				if (disk.low) disk.text += ` · ${size(free)} free`;
-			} catch {
-				disk.low = false;
-			}
+			const { free, low } = freeSpace(lab);
+			disk.low = low;
+			if (low) disk.text += ` · ${size(free)} free`;
 			refresh();
 		});
 		survey(lab);
@@ -458,6 +452,8 @@ export default function (pi: ExtensionAPI) {
 		newsTimer = setTimeout(() => {
 			newsTimer = undefined;
 			if (!ui) return;
+			if (!busy && Date.now() - idleNews < NEWS_IDLE_REST) { scheduleNews(NEWS_REST); return; }
+			if (!busy) idleNews = Date.now();
 			const tapes = headlines().map((line) => [...NAME, ...NEWS_GAP, ...line, ...NEWS_GAP, ...NAME]);
 			if (!tapes.length) { scheduleNews(NEWS_REST); return; }
 			news = { start: Date.now(), tapes };
@@ -522,7 +518,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	const route = (j: Job) => `${j.model.provider}/${j.model.id} (${j.thinkingLevel ?? "default"})`;
 	const fleet = () => [...jobs.values()].filter((j) => !j.archived).map((j) =>
-		`${j.id}  ${j.skill}  ${route(j)}  ${j.status}  ${elapsed(j.started, j.ended)}  ${j.activity}${j.status === "running" ? ageNote(Date.now() - j.started) : ""}`).join("\n") || "PE: no workers.";
+		`${j.id}  ${j.skill}  ${route(j)}  ${j.status}  ${elapsed(j.started, j.ended)}  ${j.activity}${j.status === "running" ? ` for ${elapsed(j.since)}${ageNote(Date.now() - j.started)}` : ""}`).join("\n") || "PE: no workers.";
 
 	// Goals. Phases and revisions are durable session entries that follow the branch;
 	// `armed` is not, so a restored, reloaded, or forked session never continues alone.
@@ -536,6 +532,7 @@ export default function (pi: ExtensionAPI) {
 		? { goal: { ...goal }, activation: goal.phase === "active" && armed ? "armed" : "disarmed" }
 		: { goal: null });
 	function save(next: Goal | null, arm: boolean) {
+		cancelReaction();
 		goal = next;
 		armed = arm && next?.phase === "active";
 		if (!armed) cancelIdleReview();
@@ -546,7 +543,7 @@ export default function (pi: ExtensionAPI) {
 	function createGoal(objective: string, maxGoalRounds = DEFAULT_ROUNDS) {
 		if (goal && goal.phase !== "complete") throw new Error("An unfinished goal exists. Edit, pause, resume, or clear it first.");
 		streak = 0;
-		tidied = Date.now();
+		tidied ||= Date.now();
 		save({ id: randomUUID(), revision: 1, objective, phase: "active", roundsStarted: 0, maxGoalRounds }, true);
 	}
 	function resumeGoal() {
@@ -554,15 +551,21 @@ export default function (pi: ExtensionAPI) {
 		if (goal.phase === "active" && armed) throw new Error("The goal is already running.");
 		if (goal.roundsStarted >= goal.maxGoalRounds) throw new Error(`The goal has used all ${goal.maxGoalRounds} rounds; raise max_goal_rounds with an edit first.`);
 		streak = 0;
-		tidied = Date.now();
+		tidied ||= Date.now();
 		save(bump({ phase: "active", blockedReason: undefined }), true);
 	}
 	function restoreGoal(ctx: ExtensionContext) {
+		cancelReaction();
 		cancelIdleReview();
 		waited = 0;
 		const entry = ctx.sessionManager.getBranch().findLast((e) => e.type === "custom" && e.customType === GOAL_ENTRY);
 		const data = entry?.type === "custom" ? entry.data as { version?: number; goal?: Goal | null } : undefined;
 		goal = data?.version === 2 ? data.goal ?? null : null;
+		// The last reminder, or else the session's first goal, starts the housekeeping clock.
+		const branch = ctx.sessionManager.getBranch();
+		const since = branch.findLast((e) => e.type === "custom_message" && e.customType === "pe-housekeeping")
+			?? branch.find((e) => e.type === "custom" && e.customType === GOAL_ENTRY);
+		tidied = since ? Date.parse(since.timestamp) || 0 : 0;
 		armed = false;
 		human = false;
 		streak = 0;
@@ -589,27 +592,114 @@ export default function (pi: ExtensionAPI) {
 		const prompt = admit();
 		if (!prompt) return;
 		pi.appendEntry(GOAL_ENTRY, { version: 2, goal });
-		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: false }, { triggerTurn: true });
+		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: true }, { triggerTurn: true });
 	}
 
 	function cancelIdleReview() {
 		if (idleReview) clearTimeout(idleReview);
 		idleReview = undefined;
 	}
+	// One fresh, tool-free opinion at settlement. A durable cooldown prevents a
+	// reaction -> reply -> reaction loop, including across reloads and resumes.
+	function startIdleReaction(ctx: ExtensionContext) {
+		const lab = labRoot(ctx.cwd), model = ctx.model;
+		const eligible = () => armed && goal?.phase === "active" && running().length > 0
+			&& !ctx.hasPendingMessages() && (ctx.isIdle() || !!wakeManager);
+		if (!lab || !model || reactionWork || !eligible()
+			|| /^[ \t]*Idle review:[ \t]*off\b/im.test(labFile(lab))) return;
+		const branch = ctx.sessionManager.getBranch();
+		const previous = branch.findLast(e => e.type === "custom" && e.customType === "pe-idle-review");
+		if (previous && Date.now() - Date.parse(previous.timestamp) < IDLE_REACTION_MS) return;
+		const last = branch.findLast(e => e.type === "message" && e.message.role === "assistant");
+		if (last?.type !== "message" || last.message.role !== "assistant" || last.message.stopReason !== "stop") return;
+		const reply = last.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+		if (!reply.trim()) return;
+		const owner = generation, revision = goal!.revision, goalId = goal!.id;
+		const controller = new AbortController();
+		reactionAbort = controller;
+		pi.appendEntry("pe-idle-review", { replyId: last.id, provider: model.provider, model: model.id });
+		reactionWork = (async () => {
+			const timer = setTimeout(() => controller.abort(), 90_000);
+			timer.unref?.();
+			let receipt: SessionManager | undefined;
+			try {
+				// A shared lab keeps this clone's queue, fleet, and cadence under labs/<pe.lab>/.
+				// Name the file read, and leave out what is missing rather than guess.
+				const own = localConfig(lab).get("pe.lab");
+				const read = (name: string, limit?: number) => {
+					const file = [own && join("labs", own, name), name].filter((f): f is string => !!f)
+						.find((f) => existsSync(join(lab, ".research", f)));
+					if (!file) return undefined;
+					const text = readFileSync(join(lab, ".research", file), "utf8");
+					return { file: `.research/${file}`, text: limit && text.length > limit ? `${text.slice(0, limit)}\n[excerpt]` : text };
+				};
+				const snapshot = JSON.stringify({ at: new Date().toISOString(), mission: mission(ctx.cwd),
+					scope: read("SCOPE.md")?.text, lab: labFile(lab), labName: own ?? null, objective: goal!.objective,
+					manager: { provider: model.provider, model: model.id, effort: ctx.thinkingLevel ?? "default" },
+					latestReply: reply.slice(0, 8000), workers: running().map(j => ({ id: j.id,
+						brief: j.task.slice(0, 1000), age: elapsed(j.started), activity: j.activity, activityAge: elapsed(j.since) })),
+					status: read("STATUS.md", 3000), queue: read("QUEUE.md", 2000), fleet: read("FLEET.md", 1500),
+					cadence: read("CADENCE.md", 2000), environment: read("ENV.md", 1500), latestNote: notes.latest || null,
+					cachedDisk: disk.text || "unknown",
+					remote: { name: remote.name || null, cachedCommitsBehind: remote.name ? remote.behind : null,
+						lastFetchAttempt: remote.fetched ? new Date(remote.fetched).toISOString() : null },
+					recentReactions: branch.filter(e => e.type === "custom_message" && e.customType === "pe-idle-reaction")
+						.slice(-3).map(e => e.type === "custom_message" ? e.content : "") });
+				// Keep the mission and limits intact; skip an oversized review instead of
+				// silently cutting them. This is a glance at the lab, not a second manager.
+				if (snapshot.length + idleReviewPrompt.length > Math.min(48_000, model.contextWindow)) {
+					ctx.ui.notify("PE idle review skipped: the lab snapshot is too large.", "warning");
+					return;
+				}
+				const local = join(lab, ".research/local");
+				mkdirSync(local, { recursive: true });
+				if (!existsSync(join(local, ".gitignore"))) writeFileSync(join(local, ".gitignore"), "*\n", { flag: "wx" });
+				receipt = SessionManager.create(ctx.cwd, join(local, "idle-reviews"));
+				receipt.appendModelChange(model.provider, model.id);
+				receipt.appendThinkingLevelChange(ctx.thinkingLevel ?? "default");
+				receipt.appendCustomEntry("pe-idle-review", { systemPrompt: idleReviewPrompt, parentSession: ctx.sessionManager.getSessionId() });
+				const message = { role: "user" as const, content: snapshot, timestamp: Date.now() };
+				receipt.appendMessage(message);
+				indexSession(lab, receipt.getHeader(), receipt.getSessionFile(), { ...historyMeta, role: "idle-review", observedFrom: 0 });
+				const response = await ctx.modelRegistry.streamSimple(model, { systemPrompt: idleReviewPrompt, messages: [message], tools: [] },
+					{ reasoning: ctx.thinkingLevel, maxTokens: Math.min(model.maxTokens || REACTION_TOKENS, REACTION_TOKENS), signal: controller.signal, sessionId: receipt.getSessionId() }).result();
+				receipt.appendMessage(response);
+				const text = response.content.filter(c => c.type === "text").map(c => c.text).join(" ").replace(/\s+/g, " ").trim();
+				if (controller.signal.aborted || owner !== generation || goal?.id !== goalId || goal?.revision !== revision || !armed || goal.phase !== "active") return;
+				// Reasoning counts against the output limit, so a cut-off review says why it was dropped.
+				const skip = response.stopReason !== "stop" ? `stopped: ${response.stopReason}` : !text || /^WAIT\W*$/i.test(text) ? ""
+					: [...text].length > 600 ? "too long" : branch.some(e => e.type === "custom_message" && e.customType === "pe-idle-reaction" && e.content === text) ? "repeat" : undefined;
+				if (skip !== undefined) { if (skip) receipt.appendCustomEntry("pe-idle-review-skip", { reason: skip }); return; }
+				// A busy manager reads it after its current tool call; an idle one gets a turn.
+				if (ctx.isIdle() || wakeManager) human = false;
+				pi.sendMessage({ customType: "pe-idle-reaction", content: text, display: true }, { triggerTurn: true, deliverAs: "steer" });
+				wakeManager?.();
+			} catch (error) {
+				receipt?.appendCustomEntry("pe-idle-review-error", { error: String(error) });
+				if (!controller.signal.aborted && owner === generation) ctx.ui.notify("PE idle review unavailable; the lab keeps working.", "warning");
+			} finally {
+				clearTimeout(timer);
+				if (receipt) void scheduleReport(lab).catch(error => historyError(ctx, error));
+			}
+		})().catch(error => historyError(ctx, error)).finally(() => { reactionWork = undefined; reactionAbort = undefined; });
+	}
 	// Only a settled manager needs a nudge. A headless run waits at the settlement
 	// boundary instead; wake releases that wait after the nudge is queued.
 	function scheduleIdleReview(ctx: ExtensionContext, wake?: () => void) {
 		cancelIdleReview();
 		const eligible = () => armed && goal?.phase === "active" && inLab(ctx.cwd) && running().length > 0;
+		const red = () => running().filter((j) => age(Date.now() - j.started).stage >= AGE_INSPECT);
 		// Two free slots may deserve new work; a worker the operator sees as red deserves a look.
 		const reason = () => slots - running().length >= 2 ? "with at least two free worker slots"
-			: running().some((j) => age(Date.now() - j.started).stage >= AGE_INSPECT) ? "while a worker's footer cell is red" : "";
+			: red().length ? "while a worker's footer cell is red" : "";
 		if (!eligible()) return;
 		const owner = generation, delay = idleDelay(waited);
 		idleReview = setTimeout(() => {
 			idleReview = undefined;
 			if (owner !== generation || !eligible() || (wake && ctx.signal?.aborted)
 				|| ctx.hasPendingMessages() || (!wake && !ctx.isIdle())) return;
+			if (housekeep(ctx)) return; // A due housekeeping check takes this idle moment.
+			slots = workerLimit(ctx.cwd);
 			const why = reason();
 			if (!why) { scheduleIdleReview(ctx, wake); return; } // A full, young fleet: look again later.
 			// Like a worker notice, a check spends no goal round, so waiting on long
@@ -621,11 +711,11 @@ export default function (pi: ExtensionAPI) {
 Objective: ${JSON.stringify(goal!.objective)}
 The manager has been idle for ${span(delay)} ${why}.
 Now: ${slots - live.length}/${slots} slots free. Running workers (age, last observed activity):
-${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity}${ageNote(Date.now() - j.started)}; brief: ${j.task.slice(0, 240)}`).join("\n")}
-
+${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity} for ${elapsed(j.since)}${ageNote(Date.now() - j.started)}; brief: ${j.task.slice(0, 240)}`).join("\n")}
+${red().length ? `\nRed: ${red().map((j) => j.id).join(", ")}. Take a look at each: its scratch, its transcript under session/, or a steer. pe_send_message with interrupt stops a stuck command so the worker reads you now.\n` : ""}
 Briefly check whether these experiments are still useful and whether an independent question deserves attention. You may investigate, delegate, steer a worker, or keep waiting. Age alone is not evidence of failure. Do not stop work or invent tasks just to fill slots. If waiting is appropriate, end this turn; the next check comes after ${span(idleDelay(waited))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
 </fleet_check>`;
-			pi.sendMessage({ customType: "pe-goal-round", content: check, display: false }, { triggerTurn: true });
+			pi.sendMessage({ customType: "pe-fleet-check", content: check, display: true }, { triggerTurn: true });
 			wake?.();
 		}, delay);
 		idleReview.unref?.();
@@ -642,7 +732,7 @@ Briefly check whether these experiments are still useful and whether an independ
 			const light = theme.appearance === "light";
 			// One shared clock moves a two-dot gap along the row; colors ramp with age (src/cells.mjs).
 			const starts = Array.from({ length: shown }, (_, slot) => live.find((j) => j.slot === slot)?.started ?? null);
-			const cells = row(now, starts).map((c) => {
+			const cells = row(now, starts, busy).map((c) => {
 				if (c.free || c.off) return theme.fg("dim", c.glyph);
 				const [r, g, b] = tint(c.at, light);
 				return theme.style(c.glyph, { fg: { kind: "rgb", r, g, b } });
@@ -663,13 +753,18 @@ Briefly check whether these experiments are still useful and whether an independ
 				parts.push(remote.open ? blue(mail) : theme.fg("muted", mail));
 			}
 			const shared = [remote.bytes && size(remote.bytes), remote.behind && `+${remote.behind}`, remote.ahead && `${remote.ahead} to push`].filter(Boolean);
-			if (shared.length) parts.push(theme.fg("muted", `remote: ${shared.join(" ")}`));
-			if (disk.text) parts.push(theme.fg(disk.low ? "warning" : "dim", `disk: ${disk.text}`));
+			// ⎇ is git's branch mark for the lab remote, ⛁ a stack of platters for the local disk:
+			// plain Unicode, so they render through system fallback fonts without a Nerd Font.
+			if (shared.length) parts.push(theme.fg("muted", `⎇ ${shared.join(" ")}`));
+			if (disk.text) parts.push(theme.fg(disk.low ? "warning" : "dim", `⛁ ${disk.text}`));
 			if (integrityLabel) parts.push(theme.fg("warning", integrityLabel));
-			ui.setStatus("persistent-eclipse", parts.join(" · "));
+			// Write only when the text changes; a still footer then never touches the terminal.
+			const status = parts.join(" · ");
+			if (status !== shownStatus) { shownStatus = status; ui.setStatus("persistent-eclipse", status); }
 		}
-		if (ui && live.length && !ticker) ticker = setInterval(refresh, STEP_MS);
-		if ((!ui || !live.length) && ticker) { clearInterval(ticker); ticker = undefined; }
+		const every = ui && live.length ? (busy ? STEP_MS : IDLE_MS) : 0;
+		if (ticker && every !== tickerEvery) { clearInterval(ticker); ticker = undefined; }
+		if (every && !ticker) { ticker = setInterval(refresh, every); ticker.unref?.(); tickerEvery = every; }
 	}
 	function sync(ctx: ExtensionContext) {
 		const lab = inLab(ctx.cwd), on = active(ctx.cwd);
@@ -677,8 +772,10 @@ Briefly check whether these experiments are still useful and whether an independ
 		const tools = current.filter((t) => !WORKER_TOOLS.includes(t) && !GOAL_TOOLS.includes(t) && t !== SEARCH_TOOL);
 		const next = [...tools, ...(lab ? [...WORKER_TOOLS, SEARCH_TOOL] : []), ...(on ? GOAL_TOOLS : [])];
 		if (next.length !== current.length || next.some((t, i) => t !== current[i])) pi.setActiveTools(next);
-		if (!on) ui?.setStatus("persistent-eclipse", undefined);
-		ui = on && ctx.mode === "tui" ? ctx.ui : undefined;
+		if (!on) { ui?.setStatus("persistent-eclipse", undefined); shownStatus = undefined; }
+		const footer = on && ctx.mode === "tui" ? ctx.ui : undefined;
+		if (footer !== ui) shownStatus = undefined;
+		ui = footer;
 		if (!ui) stopNews();
 		else if (!newsTimer && !news) scheduleNews(NEWS_FIRST);
 		if (lab) {
@@ -702,6 +799,24 @@ Briefly check whether these experiments are still useful and whether an independ
 		refresh();
 		await job.session?.abort();
 	}
+	// A steer waits for the worker's current tool call; a nudge stops it so the worker reads now.
+	function nudge(job: Job, message: string) {
+		if (!job.session) { job.messages.push(message); return; }
+		job.nudge = job.nudge ? `${job.nudge}\n\n${message}` : message;
+		void job.session.abort().catch(() => {});
+	}
+	// During a goal, between turns or at an idle check while the manager waits on workers.
+	// The clock lives in the session, so reloads and resumes don't push the reminder back.
+	function housekeep(ctx: ExtensionContext) {
+		const lab = labRoot(ctx.cwd), every = lab ? housekeepingEvery(lab) : 0;
+		if (!every || !armed || goal?.phase !== "active" || Date.now() - tidied < every) return false;
+		tidied = Date.now();
+		// Steered into a turn in progress, or a turn of its own that speaks for the goal.
+		if (ctx.isIdle() || wakeManager) human = false;
+		pi.sendMessage({ customType: "pe-housekeeping", content: housekeepingPrompt(every, disk.text, waitingTools(lab!)), display: true }, { triggerTurn: true, deliverAs: "steer" });
+		wakeManager?.();
+		return true;
+	}
 	function requireLab(ctx: ExtensionContext) {
 		const lab = labRoot(ctx.cwd);
 		if (!lab) throw new Error("PE worker tools are available only inside a Persistent Eclipse lab.");
@@ -720,8 +835,13 @@ Briefly check whether these experiments are still useful and whether an independ
 		let unsubscribe: (() => void) | undefined;
 		try {
 			const cwd = requireLab(ctx);
-			const body = (name: string) => entries.find((s) => s.name === name)!.body;
-			const guide = /^Mode: math(?:-team)?$/m.test(job.mission) ? "pe-math" : /^Mode: blue-team$/m.test(job.mission) ? "pe-patch" : undefined;
+			// A skill pasted into the prompt names its notes folder, since there is no file to resolve against.
+			const body = (name: string) => {
+				const entry = entries.find((s) => s.name === name)!;
+				return entry.notes ? `${entry.body}\n(${name}'s notes/ folder: ${join(root, name, "notes")})\n` : entry.body;
+			};
+			const guide = /^Mode: math(?:-team)?$/m.test(job.mission) ? "pe-math" : /^Mode: blue-team$/m.test(job.mission) ? "pe-patch"
+				: /^Mode: signals$/m.test(job.mission) ? "pe-hunt" : undefined;
 			const scratch = relative(cwd, job.folder);
 			const others = skills().map((s) => `- ${s.name}: ${s.filePath}`).join("\n");
 			const role = `# Persistent Eclipse worker ${job.id}
@@ -768,6 +888,7 @@ who writes the shared record.`;
 				cwd, agentDir: getAgentDir(), noSkills: true, noPromptTemplates: true,
 				extensionFactories: [worker => installRetry(worker, retryEnabled, (text, error) => {
 					job.activity = text;
+					job.since = Date.now();
 					refresh();
 					// Tell the manager once. A worker waiting on its provider is not at work, and the
 					// cause may need the manager or the operator: credit, a key, or a model setting.
@@ -815,14 +936,26 @@ who writes the shared record.`;
 			if (job.stop) throw new Error(job.stop);
 			unsubscribe = session.subscribe((event) => {
 				if (event.type === "turn_end" || event.type === "agent_end") keepWorkerHistory();
-				if (event.type === "tool_execution_start") job.activity = event.toolName;
-				if (event.type === "tool_execution_end") job.activity = "thinking";
-				if (event.type === "tool_execution_start" || event.type === "tool_execution_end") refresh();
+				if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+					job.activity = event.type === "tool_execution_start" ? event.toolName : "thinking";
+					job.since = Date.now();
+					refresh();
+				}
 			});
 			job.activity = "thinking";
+			job.since = Date.now();
 			await Promise.all([session.prompt(`Task ${job.id}:\n${task}`, { expandPromptTemplates: false }),
 				...job.messages.splice(0).map((message) => session.steer(message))]);
 			await session.waitForIdle();
+			// A nudge aborted the current call; the worker carries on in the same session.
+			while (job.nudge && !job.stop) {
+				const message = job.nudge;
+				job.nudge = undefined;
+				job.activity = "thinking";
+				job.since = Date.now();
+				await session.prompt(message, { expandPromptTemplates: false });
+				await session.waitForIdle();
+			}
 			keepWorkerHistory();
 			text = session.getLastAssistantText() ?? "";
 			const last = session.messages.findLast((m) => m.role === "assistant");
@@ -900,7 +1033,7 @@ who writes the shared record.`;
 			const folder = join(scratch, taskId);
 			mkdirSync(folder); // Never reuse an existing task or overwrite its evidence.
 			const slot = Array.from({ length: slots }, (_, i) => i).find((i) => !running().some((j) => j.slot === i))!;
-			const job: Job = { id: taskId, slot, skill, task, model, thinkingLevel, mission: direction, folder, started: Date.now(), status: "running", activity: "starting", messages: [], work: Promise.resolve() };
+			const job: Job = { id: taskId, slot, skill, task, model, thinkingLevel, mission: direction, folder, started: Date.now(), status: "running", activity: "starting", since: Date.now(), messages: [], work: Promise.resolve() };
 			jobs.set(taskId, job);
 			waited = 0;
 			job.work = work(job, task, ctx);
@@ -935,14 +1068,16 @@ who writes the shared record.`;
 		},
 	});
 	pi.registerTool({ name: "pe_send_message", label: "PE steer worker", defaultActive: false,
-		description: "Steer a running Persistent Eclipse worker with additional evidence or instructions.",
-		parameters: Type.Object({ taskId: Type.String(), message: Type.String({ minLength: 1 }) }),
-		async execute(_id, { taskId, message }, _signal, _update, ctx) {
+		description: "Steer a running Persistent Eclipse worker with additional evidence or instructions. A steer waits until the worker's current tool call returns; interrupt stops that call so the worker reads the message now.",
+		parameters: Type.Object({ taskId: Type.String(), message: Type.String({ minLength: 1 }),
+			interrupt: Type.Optional(Type.Boolean({ description: "Stop the worker's current command or reply first. Its session, scratch, and assignment continue." })) }),
+		async execute(_id, { taskId, message, interrupt }, _signal, _update, ctx) {
 			const job = findJob(taskId, ctx);
 			if (job.status !== "running" || job.stop) throw new Error(`${taskId} is not running.`);
-			if (job.session) await job.session.steer(message);
+			if (interrupt && job.session) nudge(job, message);
+			else if (job.session) await job.session.steer(message);
 			else job.messages.push(message);
-			return result(`Steering message queued for PE worker ${taskId}.`);
+			return result(interrupt && job.session ? `Interrupted PE worker ${taskId}'s ${job.activity}; it reads your message next.` : `Steering message queued for PE worker ${taskId}.`);
 		},
 	});
 	pi.registerTool({ name: "pe_list_agents", label: "PE workers", defaultActive: false,
@@ -1102,6 +1237,7 @@ who writes the shared record.`;
 			} else if (action === "complete") {
 				if (goal.phase === "complete") throw new Error("The goal is already complete.");
 				save(bump({ phase: "complete", blockedReason: undefined }), false);
+				pi.sendMessage({ customType: "pe-status-report", content: REPORT_PROMPT, display: true }, { triggerTurn: true, deliverAs: "followUp" });
 			} else {
 				if (!blocked_reason?.trim()) throw new Error("blocked requires blocked_reason: the concrete condition that blocks progress.");
 				if (!human && streak < BLOCKED_AFTER) throw new Error(`blocked is rejected before ${BLOCKED_AFTER} consecutive goal rounds. Keep working; difficulty or remaining work is not a blocker.`);
@@ -1155,6 +1291,8 @@ who writes the shared record.`;
 	}
 	pi.on("session_shutdown", async (event, ctx) => {
 		armed = false;
+		cancelReaction();
+		await reactionWork;
 		cancelIdleReview();
 		generation++; // Suppress late notices before the next session can start.
 		if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = undefined; }
@@ -1167,24 +1305,28 @@ who writes the shared record.`;
 		stopNews();
 		ui?.setStatus("persistent-eclipse", undefined);
 		ui = undefined;
+		busy = false;
+		shownStatus = undefined;
 		refresh();
 	});
 	pi.on("input", (event) => {
-		if (event.source !== "extension") { human = true; streak = 0; waited = 0; }
+		if (event.source !== "extension") { cancelReaction(); human = true; streak = 0; waited = 0; }
 	});
 	pi.on("agent_settled", (event, ctx) => {
+		busy = false; // The footer stands still until the next turn; refreshed below or by sync.
+		refresh();
 		// An abort ends this turn, not the background work: workers keep running, as DSH
 		// subagents do. A goal round under way is paused; other work only disarms the goal.
 		if (event.aborted && armed && goal?.phase === "active") {
 			if (human) { armed = false; refresh(); } else save(bump({ phase: "paused" }), false);
 			sync(ctx);
 		}
-		if (!due) { scheduleIdleReview(ctx); return; }
+		if (!due) { scheduleIdleReview(ctx); if (!event.aborted) startIdleReaction(ctx); return; }
 		due = false;
 		const prompt = admit();
 		if (!prompt) { sync(ctx); ctx.ui.notify(goalText(), "info"); return; }
 		pi.appendEntry(GOAL_ENTRY, { version: 2, goal });
-		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: false }, { triggerTurn: true });
+		pi.sendMessage({ customType: "pe-goal-round", content: prompt, display: true }, { triggerTurn: true });
 	});
 	pi.on("agent_before_settle", async (event, ctx) => {
 		cancelIdleReview();
@@ -1196,7 +1338,11 @@ who writes the shared record.`;
 				if (live.length && !event.continue && !ctx.hasPendingMessages() && !event.context.pendingMessages.length) {
 					// The first completion has queued a notice; let the manager read it now.
 					const worker = await Promise.race([...live.map(j => j.work.then(() => j)),
-						new Promise<void>(resolve => scheduleIdleReview(ctx, resolve))]);
+						new Promise<void>(resolve => {
+							wakeManager = resolve;
+							scheduleIdleReview(ctx, resolve);
+							startIdleReaction(ctx);
+						})]).finally(() => { wakeManager = undefined; });
 					// Cancellation without an armed goal posts a notice but starts no turn.
 					if (worker && worker.status === "cancelled" && !(armed && goal?.phase === "active"))
 						await Promise.all(running().map(j => j.work));
@@ -1222,7 +1368,7 @@ who writes the shared record.`;
 		if (!prompt) { sync(ctx); ctx.ui.notify(goalText(), "info"); return; }
 		return { entries: [
 			{ type: "custom" as const, customType: GOAL_ENTRY, data: { version: 2, goal } },
-			{ type: "custom_message" as const, customType: "pe-goal-round", content: prompt, display: false },
+			{ type: "custom_message" as const, customType: "pe-goal-round", content: prompt, display: true },
 		], continue: true };
 	});
 
@@ -1233,12 +1379,7 @@ who writes the shared record.`;
 		keepHistory(ctx);
 		placeTools(ctx.cwd);
 		sync(ctx);
-		// The reminder arrives between turns, as worker notices do, never inside a tool call.
-		const every = housekeepingEvery(labRoot(ctx.cwd)!);
-		if (every && armed && goal?.phase === "active" && Date.now() - tidied >= every) {
-			tidied = Date.now();
-			pi.sendMessage({ customType: "pe-housekeeping", content: housekeepingPrompt(every, disk.text), display: false }, { deliverAs: "steer" });
-		}
+		housekeep(ctx);
 	});
 
 	pi.on("resources_discover", (event) => {
@@ -1248,6 +1389,7 @@ who writes the shared record.`;
 
 	pi.on("before_agent_start", (event, ctx) => {
 		cancelIdleReview();
+		busy = true;
 		seen = labState(ctx.cwd);
 		human = event.messageType === "user";
 		if (human) streak = 0;
@@ -1268,7 +1410,9 @@ who writes the shared record.`;
 			});
 		}
 	});
-	pi.on("turn_start", () => cancelIdleReview());
+	pi.on("turn_start", () => { cancelIdleReview(); if (!busy) { busy = true; refresh(); } });
+	pi.on("model_select", cancelReaction);
+	pi.on("thinking_level_select", cancelReaction);
 
 	pi.registerCommand("pe-version", {
 		description: "Check PE runtime hashes, local edits, upstream updates, and whether a reload is needed",

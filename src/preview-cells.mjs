@@ -1,9 +1,10 @@
-// Preview Pi's footer worker cells in this terminal: node src/preview-cells.mjs [--fast]
+// Preview Pi's footer worker cells in this terminal: node src/preview-cells.mjs [--fast] [--still]
 // Sample workers at several ages, with two free slots. --fast runs 100 minutes of age
-// in 30 seconds, so the color ramp is visible. Ctrl-C stops.
+// in 30 seconds, so the color ramp is visible. --still shows the footer between turns.
+// Ctrl-C stops.
 import {row, tint, ageLabel, AGE_FULL_MS} from './cells.mjs';
 
-const fast = process.argv.includes('--fast');
+const fast = process.argv.includes('--fast'), still = process.argv.includes('--still');
 const minutes = [1, 25, null, 45, 70, null, 105]; // null: a free slot
 const began = Date.now(), speed = fast ? AGE_FULL_MS / 30_000 : 1;
 const light = process.argv.includes('--light');
@@ -16,7 +17,7 @@ process.on('SIGINT', quit);
 setInterval(() => {
   const now = Date.now(), aged = (now - began) * speed;
   const starts = minutes.map(m => m === null ? null : now - m * 60_000 - aged);
-  const cells = row(now, starts).map(c => c.free || c.off ? dim(c.glyph) : paint(tint(c.at, light), c.glyph)).join(' ');
+  const cells = row(now, starts, !still).map(c => c.free || c.off ? dim(c.glyph) : paint(tint(c.at, light), c.glyph)).join(' ');
   const ages = starts.map(s => s === null ? 'free' : `${Math.floor((now - s) / 60_000)}m ${ageLabel(now - s)}`).join(' · ');
   process.stdout.write(`\r\x1b[2K${dim('Persistent Eclipse')} · ${cells} ${paint([90, 205, 120], '+12')}   ${dim(ages)}`);
 }, 30);

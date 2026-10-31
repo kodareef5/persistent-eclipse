@@ -5,7 +5,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const runtimeFiles = ['extension.ts', 'cordis.patch.yml', 'package.json',
-  'src/history.mjs', 'src/retry-pi.ts', 'src/retry.mjs', 'src/integrity.mjs', 'src/cells.mjs'];
+  'src/history.mjs', 'src/retry-pi.ts', 'src/retry.mjs', 'src/integrity.mjs', 'src/cells.mjs', 'src/lab-status.mjs', 'src/idle-review.md'];
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const options = root => ({cwd: root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024,
   env: {...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never'}});

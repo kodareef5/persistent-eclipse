@@ -4,16 +4,39 @@
   "private": true,
   "description": "A persistent Git-native research lab for DeepSeek Harness and Pi: Red Team, Blue Team, Math Team, and session goals.",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./extension.ts"]
+    "extensions": [
+      "./extension.ts"
+    ]
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./dsh-ui.patch.yml"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "external": []
     }
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.4.0"
+  },
+  "exports": {
+    ".": "./dsh-host.js",
+    "./client": "./dsh-client.js",
+    "./package.json": "./package.json"
   }
 }

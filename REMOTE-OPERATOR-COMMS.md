@@ -1,5 +1,8 @@
 # Remote operator conversations
 
+The inbox carries your direction into the labs; status reports carry their account
+back out (see [Read the labs' status reports](#read-the-labs-status-reports)).
+
 Use `.research/inbox/` in a **research lab's checkout**, sharing its approved private
 research remote. This Persistent Eclipse package repository is not the lab inbox.
 A message reaches other labs after it is committed and pushed, then pulled by their
@@ -103,3 +106,23 @@ referencing the old one.
 
 The current linter may advise that `operator` has no `.research/labs/operator/`
 folder. That is advisory, not a failed check; no dummy lab registration is needed.
+
+## Read the labs' status reports
+
+Pull the research branch and open `.research/SUMMARY.md`: a TL;DR, the decisions
+waiting for you, where the labs stand, with unfamiliar terms explained for a reader outside the
+specialty. For a lab's
+own account, read its files in `.research/status-reports/`, named
+`<UTC stamp>-<lab>-<trigger>.md`: what changed, what's next, what it needs from you,
+and its numbers since the last one.
+
+Each lab files a status report at every six-hour housekeeping check and when a goal
+completes; a report from the last hour covers another automatic trigger unless something
+important changed. Routine updates can be brief. Ask a manager for one at any time. `Status reports: off` in LAB.md stops
+them. Answer a request in a report the usual way, with an inbox message that names the
+report in `re`.
+
+A summary is only as current as the last push. If one lab's report is newer than the
+summary's `folds` list, `node .research/tools/status-report.mjs check` names it, and
+the lab that wrote the summary last folds it back in.
+

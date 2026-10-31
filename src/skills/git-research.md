@@ -362,11 +362,27 @@ No particular notebook format or additional framework is required.
 
 ### Share the machine
 
+Before a large fuzz run, brute-force search, or parameter sweep, identify what its
+outcome would distinguish and why that matters. Consider whether reasoning about
+the mechanism, changing the representation, or constructing a small case would
+answer it more directly. Use computation to test a useful idea; do not start a long
+script simply to fill time when the next idea is difficult to find.
+
 For work likely to compete for CPU, memory, disk, or shared build state, consult
 `.research/ENV.md` and current host load. A large compile, long fuzz run, solver sweep,
 or dependency build should have an owner and a bounded budget. Start with **one heavy
 job at a time per lab**. The manager can arrange more capacity when the machine and
 independent build directories support it; record that arrangement in ENV.md.
+
+Give long commands a timeout. For longer experiments, run them in the background
+and check progress. Agree runs expected to exceed an hour with the manager before
+starting. A normal steering message waits until the current command returns.
+
+While a background experiment runs, a short source read, an assumption check, or
+planning the next discriminating test can help. Stay within your brief, check the
+run's progress, and avoid another heavy job competing for the same resources.
+A command or model reply still in flight is not idle time. If there is no useful
+independent question, wait for the evidence rather than inventing extra work.
 
 ### A shared checkout note
 

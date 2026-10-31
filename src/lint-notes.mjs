@@ -131,7 +131,7 @@ function qualify(lab, write) {
   const OLD_RE = /(?<![\w:-])(R|REQ)-([1-9][0-9]*)(?![\w-])/g;
   const swap = (text) => text.replace(OLD_RE, (whole) => map.get(whole) ?? whole);
   // The record's own prose: top-level files, notes, reports, reviews, intel notes, inbox,
-  // lab folders, and each run's or proof's README. Anything deeper is evidence.
+  // status reports, lab folders, and each run's or proof's README. Anything deeper is evidence.
   // Never read: scratch and caches. Read only for the digests they quote: receipts,
   // exports, and imported packs, which are never rewritten.
   const SKIP = new Set(["scratch", "local", "activity", "tools", "vendor", ".lake", "node_modules", ".git"]);
@@ -140,7 +140,7 @@ function qualify(lab, write) {
     const parts = rel.split("/");
     if (!rel.endsWith(".md")) return false;
     if (parts.length === 1) return true;
-    if (["notes", "reports", "reviews", "labs", "inbox"].includes(parts[0])) return true;
+    if (["notes", "reports", "reviews", "labs", "inbox", "status-reports"].includes(parts[0])) return true;
     if (parts[0] === "intel") return parts.length === 2;
     if (["runs", "lean"].includes(parts[0])) return parts.length === 3 && parts[2] === "README.md";
     return false;

@@ -1,13 +1,15 @@
 // Pi's footer worker cells, shared by extension.ts and src/preview-cells.mjs.
 // A running worker is a full braille stack whose color ramps with its age; a free slot
-// is a dim ⣀. One two-dot gap travels the whole row on a shared clock: through each
-// running cell from the bottom-left, up the left side and down the right, across each
-// free cell's two dots, then a short rest before it starts again from the first cell.
+// is a dim ⣀. While the manager works, one two-dot gap travels the whole row on a shared
+// clock: through each running cell from the bottom-left, up the left side and down the
+// right, across each free cell's two dots, then a short rest before it starts again.
+// Between turns the row stands still, so the terminal's own text selection keeps working;
+// it changes at most once every IDLE_MS.
 
 export const AGE_FULL_MS = 100 * 60_000;
 export const AGES = ['light yellow', 'blue', 'green', 'orange', 'red', 'dark red'];
 export const AGE_INSPECT = AGES.indexOf('red'); // From here the manager should look at the worker.
-export const STEP_MS = 90, REST_STEPS = 6;
+export const STEP_MS = 90, REST_STEPS = 6, IDLE_MS = 60_000;
 
 // Braille dot bits. A running cell's path: up the left column, then down the right.
 const PATH = [0x40, 0x04, 0x02, 0x01, 0x08, 0x10, 0x20, 0x80], FREE = [0x40, 0x80];
@@ -37,10 +39,16 @@ export function tint(at, light = false) {
 }
 
 // starts: one entry per slot, a running worker's start time or null for a free slot.
+// moving: whether the gap travels and the oldest workers blink; otherwise ages advance
+// in IDLE_MS steps, so a still row's text changes only that often.
 // Returns each cell's glyph and, for a running worker, its age position and blink state.
-export function row(now, starts) {
-  // With nothing running the footer stops animating, so a free row rests without a gap.
-  if (starts.every(start => start === null)) return starts.map(() => ({glyph: glyph(0xc0), free: true}));
+export function row(now, starts, moving = true) {
+  if (!moving) now = Math.floor(now / IDLE_MS) * IDLE_MS;
+  // A still row, or one with nothing running, rests without a gap.
+  if (!moving || starts.every(start => start === null)) return starts.map(start => {
+    if (start === null) return {glyph: glyph(0xc0), free: true};
+    return {glyph: glyph(0xff), free: false, at: age(now - start).at, off: false};
+  });
   const path = starts.flatMap((start, slot) => (start === null ? FREE : PATH).map(bit => ({slot, bit})));
   const step = Math.floor(now / STEP_MS) % (path.length + 1 + REST_STEPS);
   // The gap covers path[step - 1] and path[step]: it slides in and out at the row's ends.

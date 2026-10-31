@@ -15,7 +15,10 @@ again whenever the operator changes the lab's objective.
 ## The mission
 Write `.research/MISSION.md` from the texts at the end of this skill, byte for byte.
 Blue Team is the default. Use Red Team when the operator asks for a critical hunt or a
-disclosure, and Math Team when the subject is mathematics rather than code. An existing
+disclosure, and Math Team when the subject is mathematics rather than code. Use Signal
+Hunt when the subject is a field rather than code or mathematics, such as a market,
+an audience, a legal matter, or a tax practice: deep and wide investigation, with
+recurring reports when the operator wants them. An existing
 `MISSION.md` is the lab's authority, including the operator's edits: keep it.
 
 The operator can change the mission at any time, in plain words. Amend the file to say
@@ -27,7 +30,8 @@ what they asked, record the change in STATUS, and reconcile QUEUE and draft repo
   acceptance criteria; it does not rewrite the rest.
 - Math Team treats a body of mathematics the way the others treat code. A code lab
   turned into a math lab, or back, does not fit one record: say so, and suggest a
-  separate lab rather than rewriting the mission.
+  separate lab rather than rewriting the mission. The same holds for a Signal Hunt
+  desk, whose subject is a field rather than code or mathematics.
 
 The other `pe-*` skills do not exist yet. A `skill` call for any of them returns
 `unknown or no longer available` until this step has written `.research/LAB.md`. That is
@@ -54,6 +58,7 @@ Initialize:
        .research/SCOPE.md       authorization, channel, in/out of scope, disclosure
        .research/SOURCES.md    each source, its origin, and its pin
        .research/STATUS.md     what is known now
+       .research/SUMMARY.md    the executive summary for the operator, from status reports
        .research/QUEUE.md      open tasks, from T-1
        .research/MAP.md        sections, taxonomy, coverage matrix
        .research/LABELS.md     optional shared label vocabulary
@@ -62,13 +67,14 @@ Initialize:
        .research/ENV.md        what the lab can build and run, and its limits
        .research/RUNS.md       substantial experiments and their results
        .research/runs/         retained inputs and results for substantial runs
-       .research/tools/        cvss.mjs, lint-notes.mjs, and pack.mjs, placed by the runtime
+       .research/tools/        cvss, lint-notes, pack, history, and status-report .mjs, placed by the runtime
        .research/vendor/       dependency source at <pkg>@<version>, for a cited read
        .research/FLEET.md      live subagents and their tasks
        .research/WATCH.md      upstream watch list
        .research/FEEDBACK.md    lab and tooling friction, for the operator
        .research/labs/<lab>/    each lab's host, queue, fleet, and cadence, once shared
        .research/inbox/         messages between labs, once shared
+       .research/status-reports/ each lab's dated status reports to the operator
        .research/intel/         dated public intel, readable by every subagent
        .research/intel/INDEX.md one line per intel note, read first by subagents
        .research/reports/       prepared mission deliverables, for the operator
@@ -85,6 +91,7 @@ Initialize:
        <!-- persistent-eclipse -->
        ## Persistent Eclipse lab
        This directory is a Persistent Eclipse research lab; its record is `.research/`.
+       Read `.research/SUMMARY.md` for where the labs stand, if it exists.
        Read `.research/MISSION.md` and `.research/SCOPE.md` for the objective and bounds,
        `.research/STATUS.md` and `.research/notes/` for findings, and
        `.research/labs/*/QUEUE.md` (or `.research/QUEUE.md`) for current work.
@@ -194,7 +201,12 @@ reads SCOPE.md before it investigates, so keep it current. For mathematics, name
 papers, exact claims, regimes, literature bounds, and intended research artifacts;
 do not invent a bounty program or disclosure terms. Preserve manuscript bytes and
 line-numbered extracts as pe-math describes. For blue team, record contribution and
-security channel policies and the intended patch base.
+security channel policies and the intended patch base. For a Signal Hunt desk, SCOPE
+names who the desk serves, its field, priorities, permitted inputs, capacity, and any
+reports it owes. pe-hunt's scope notes are good starting shapes, not forms, and its cadence
+note shows a CADENCE; pe-hunt opens once LAB.md exists, so draft SCOPE from the
+mission now and compare it with the closest scope note next. Agree any recurring
+service the operator wants and start; the source map improves through the work.
 
 ## Orient, then begin
 Orient enough to ask useful questions, then begin. A perfect map is not a prerequisite
@@ -226,3 +238,7 @@ Write one of these to `.research/MISSION.md` exactly as it stands inside the fen
 ### Math Team
 ```markdown
 {{mission:math-team}}```
+
+### Signal Hunt
+```markdown
+{{mission:signals}}```

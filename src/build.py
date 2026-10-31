@@ -3,27 +3,49 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 S = ROOT / 'src' / 'skills'
 research = (ROOT / 'src' / 'research.md').read_text().strip()
 persona = (ROOT / 'src' / 'persona.md').read_text().rstrip('\n').replace('{{pe_research}}', research)
-LAB = ['git-research','survey','reader','muse','coderunner','migrator','challenger','intel','cvss','lint','dead-end','reporter','fleet','patch','math','web','export','sync','layered-challenge','history','models','model-notes']
-MISSIONS = ['blue-team', 'red-team', 'math-team']
+LAB = ['git-research','survey','reader','muse','coderunner','migrator','challenger','intel','cvss','lint','dead-end','reporter','status-report','fleet','patch','math','web','export','sync','layered-challenge','history','models','model-notes','hunt','osint','forecast','judge']
+MISSIONS = ['blue-team', 'red-team', 'math-team', 'signals']
 mission = {m: (ROOT / 'src' / 'missions' / (m + '.md')).read_text().rstrip('\n') + '\n' for m in MISSIONS}
 
 code = (ROOT / 'src' / 'cvss.mjs').read_text().rstrip() + '\n'
 lint = (ROOT / 'src' / 'lint-notes.mjs').read_text().rstrip() + '\n'
 pack = (ROOT / 'src' / 'pack.mjs').read_text().rstrip() + '\n'
 history = (ROOT / 'src' / 'history.mjs').read_text().rstrip() + '\n'
-# A skill's tables live in src/skills/<name>/, one Markdown file each, and fill its
-# {{table:<file>}} slots. Every slot needs a file and every file a slot.
-TABLE = re.compile(r'\{\{table:([a-z0-9][a-z0-9.-]*)\}\}')
+status = (ROOT / 'src' / 'status-report.mjs').read_text().rstrip() + '\n'
+ledger = (ROOT / 'src' / 'ledger.mjs').read_text().rstrip() + '\n'
+# A skill's tables and field notes live in src/skills/<name>/, one Markdown file each.
+# {{table:<file>}} inlines a file whole. {{sample:<file>}} (or {{sample:<file>:<n>}})
+# inlines its heading and first three (or n) rows, and ships the whole file as
+# notes/<file>.md beside the skill, to read on demand. {{note:<file>}} ships it and names
+# the path. Every slot needs a file and every file a slot.
+SLOT = re.compile(r'\{\{(table|sample|note):([a-z0-9][a-z0-9.-]*?)(?::([1-9][0-9]*))?\}\}')
+ROW = re.compile(r'^(\| |- |\* |[0-9]+\. )')
+def sample(text, n, path):
+    lines, out, rows, seen = text.strip().split('\n'), [], 0, 0
+    table = any(l.startswith('| --- ') or l.startswith('|---') for l in lines)
+    for i, line in enumerate(lines):
+        row = ROW.match(line) and not (table and (line.startswith('| --- ') or (i + 1 < len(lines) and lines[i + 1].startswith('| --- '))))
+        if row:
+            seen += 1
+            if seen <= n: out.append(line)
+        elif not seen: out.append(line)
+    more = seen - min(seen, n)
+    return '\n'.join(out) + (f'\n\n*+{more} more in `{path}`.*' if more else f'\n\n*More in `{path}`.*')
+NOTES = {}
 def tables(name, text):
-    folder, used = S / name, set()
+    folder, used, notes = S / name, set(), {}
     def fill(m):
-        path = folder / (m.group(1) + '.md')
-        if not path.is_file(): raise SystemExit(f'{name}: missing table {path}')
+        kind, file, n = m.group(1), m.group(2), int(m.group(3) or 3)
+        path = folder / (file if kind == 'note' and file.endswith('.mjs') else file + '.md')
+        if not path.is_file(): raise SystemExit(f'{name}: missing {kind} {path}')
         used.add(path.name)
-        return path.read_text().strip()
-    text = TABLE.sub(fill, text)
-    unused = sorted(p.name for p in folder.glob('*.md') if p.name not in used) if folder.is_dir() else []
-    if unused: raise SystemExit(f'{name}: unused tables {", ".join(unused)}')
+        if kind == 'table': return path.read_text().strip()
+        notes[path.name] = path.read_text().rstrip() + '\n'
+        return sample(path.read_text(), n, f'notes/{path.name}') if kind == 'sample' else f'`notes/{path.name}`'
+    text = SLOT.sub(fill, text)
+    unused = sorted(p.name for p in folder.iterdir() if p.suffix in ('.md', '.mjs') and p.name not in used) if folder.is_dir() else []
+    if unused: raise SystemExit(f'{name}: unused tables or notes {", ".join(unused)}')
+    NOTES['pe-' + name if name != 'git-research' else 'pe-git-research'] = notes
     return text
 
 def skill(name):
@@ -33,7 +55,9 @@ def skill(name):
     return (text.replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', hashlib.sha256(code.encode()).hexdigest())
                 .replace('{{lint.mjs}}', lint).replace('{{lint.sha256}}', hashlib.sha256(lint.encode()).hexdigest())
                 .replace('{{pack.mjs}}', pack).replace('{{pack.sha256}}', hashlib.sha256(pack.encode()).hexdigest())
-                .replace('{{history.mjs}}', history).replace('{{history.sha256}}', hashlib.sha256(history.encode()).hexdigest()))
+                .replace('{{history.mjs}}', history).replace('{{history.sha256}}', hashlib.sha256(history.encode()).hexdigest())
+                .replace('{{status-report.mjs}}', status).replace('{{status-report.sha256}}', hashlib.sha256(status.encode()).hexdigest())
+                .replace('{{ledger.mjs}}', ledger).replace('{{ledger.sha256}}', hashlib.sha256(ledger.encode()).hexdigest()))
 
 def block(text, indent):
     pad = ' ' * indent
@@ -70,6 +94,12 @@ for name in LAB:
     w(f'            description: {json.dumps(desc(name))}')
     w('            content: |')
     w(block(skill(name).rstrip('\n'), 14))
+    if NOTES.get(pe):
+        w('            # Field notes, written beside the skill and read on demand.')
+        w('            notes:')
+        for file, body in sorted(NOTES[pe].items()):
+            w(f'              {file}: |')
+            w(block(body.rstrip('\n'), 16))
 w('        # Manager-only setup skill, registered in the mode scope by pe-kickoff.')
 w('        kickoff: |')
 w(block(skill('kickoff').rstrip('\n'), 10))
@@ -80,20 +110,36 @@ prov = r'''(() => {
   const lib = () => [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
   HISTORY_HOOK
   RETRY_HOOK
+  SUPERVISE_HOOK
   const inLab = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return true; if (d === path.dirname(d)) return false } }
+  // A skill's field notes, written once to a folder named by their hash; the skill tool
+  // tells the model to resolve notes/<file>.md against it.
+  const notesBase = (name, s) => {
+    if (!s.notes || !Object.keys(s.notes).length) return {}
+    const os = process.getBuiltinModule('node:os'), crypto = process.getBuiltinModule('node:crypto')
+    const dir = path.join(os.tmpdir(), 'persistent-eclipse-notes-' + crypto.createHash('sha256').update(JSON.stringify(s.notes)).digest('hex').slice(0, 12), name)
+    try {
+      for (const [file, body] of Object.entries(s.notes)) {
+        const target = path.join(dir, 'notes', path.basename(file))
+        if (!fs.existsSync(target)) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, body) }
+      }
+      return { resourceBase: { kind: 'directory', path: dir } }
+    } catch { return {} }
+  }
   const meta = (name, s) => ({ name, description: s.description, invocation: { modelInvocable: true, userInvocable: true }, provider: 'persistent-eclipse', source: 'runtime', rank: 450, locator: name })
   skills.registerProvider(() => ({
     name: 'persistent-eclipse',
     list: async o => inLab(o.cwd) ? Object.entries(lib()).map(([n, s]) => meta(n, s)) : [],
     get: async (c, o) => {
       const s = inLab(o.cwd) && lib()[c.name]
-      return s ? { ...meta(c.name, s), content: s.content } : undefined
+      return s ? { ...meta(c.name, s), content: s.content, ...notesBase(c.name, s) } : undefined
     },
   }))
   return []
 })()'''
 w(block(prov.replace('HISTORY_HOOK', (ROOT / 'src' / 'history-dsh.js').read_text())
-            .replace('RETRY_HOOK', (ROOT / 'src' / 'retry-dsh.js').read_text()), 14))
+            .replace('RETRY_HOOK', (ROOT / 'src' / 'retry-dsh.js').read_text())
+            .replace('SUPERVISE_HOOK', (ROOT / 'src' / 'supervise-dsh.js').read_text()), 14))
 def preset(preset_id, name, description, order):
     w(f'    - id: preset-{preset_id}')
     w("      name: '@deepseek-ai/dsh-agent-preset'")
@@ -157,7 +203,7 @@ def preset(preset_id, name, description, order):
       const tools = () => {
         const skillset = [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
         const pick = (skill, tool) => new RegExp('```js ' + tool + '\\n([\\s\\S]*?)^```', 'm').exec(skillset[skill]?.content ?? '')?.[1]
-        return [['lint-notes.mjs', pick('pe-lint', 'lint-notes.mjs')], ['cvss.mjs', pick('pe-cvss', 'cvss.mjs')], ['pack.mjs', pick('pe-export', 'pack.mjs')], ['history.mjs', pick('pe-history', 'history.mjs')]]
+        return [['lint-notes.mjs', pick('pe-lint', 'lint-notes.mjs')], ['cvss.mjs', pick('pe-cvss', 'cvss.mjs')], ['pack.mjs', pick('pe-export', 'pack.mjs')], ['history.mjs', pick('pe-history', 'history.mjs')], ['status-report.mjs', pick('pe-status-report', 'status-report.mjs')], ['ledger.mjs', pick('pe-forecast', 'ledger.mjs')]]
       }
       const sha = text => crypto.createHash('sha256').update(text).digest('hex')
       let shipped
@@ -237,6 +283,13 @@ def preset(preset_id, name, description, order):
     w('                  modelSelectionSettings: true')
 
 preset('persistent-eclipse', 'Persistent Eclipse',
-       'A persistent research lab. Blue Team by default; Red Team or Math Team when the operator asks.', 10)
+       'A persistent research lab. Blue Team by default; Red Team, Math Team, or a Signal Hunt desk when the operator asks.', 10)
 (ROOT / 'cordis.patch.yml').write_text('\n'.join(out) + '\n')
+# DSH web's browser half: src/dsh-client.js with src/cells.mjs inlined, wrapped in DSH's module loader.
+cells = '\n'.join(l[7:] if l.startswith('export ') else l for l in (ROOT / 'src' / 'cells.mjs').read_text().splitlines() if not l.startswith('//'))
+client = (ROOT / 'src' / 'dsh-client.js').read_text().replace('CELLS\n', cells.strip() + '\n')
+(ROOT / 'dsh-client.js').write_text('// Generated from src/dsh-client.js and src/cells.mjs by src/build.py. Do not edit.\n'
+  'window.__ModuleLoader__.load({\n  id: "persistent-eclipse",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;\n'
+  '    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });\n'
+  + '\n'.join(('    ' + l).rstrip() for l in client.rstrip().split('\n')) + '\n    return module.exports;\n  }\n});\n')
 print('wrote', len(out), 'lines')

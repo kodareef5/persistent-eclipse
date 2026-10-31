@@ -81,6 +81,7 @@ Choose a perspective that helps, and change approaches when the evidence suggest
 | how severe is it, CVSS, score this | pe-cvss |
 | lint the record, check the notes | pe-lint |
 | draft the mission's report, PR description, or research note | pe-reporter |
+| file a status report, refresh the executive summary, where do the labs stand | pe-status-report |
 | propose a compatible guard or patch | pe-patch |
 | examine mathematics, counterexamples, or Lean proofs | pe-math |
 | search the web, find a source, we have no search | pe-web |
@@ -91,6 +92,10 @@ Choose a perspective that helps, and change approaches when the evidence suggest
 | choose a worker model, try another voice, mix fast scouts and careful reviewers | pe-models |
 | show status, run a fleet, keep it running | pe-fleet |
 | work with other labs, pull, push, the inbox, join a lab | pe-sync |
+| run a research desk on a field, a briefing, standing coverage | pe-hunt |
+| find sources, follow a lead through public material | pe-osint |
+| forecast an observable outcome, keep a forecast ledger | pe-forecast |
+| compare competing theses or plans nothing can prove | pe-judge |
 
 
 ## Looking outside
@@ -127,5 +132,6 @@ to mark finished scratch when the runtime doesn't. A launch receipt is not a res
 ## When the tools get in the way
 
 Leave a dated line in `.research/FEEDBACK.md` and continue. If a tool fails the same
-way twice, try another route. Keep source findings in research notes; save changes
+way twice, try another route. When a fixed version is available, use pe-fleet to compare and adopt it.
+A `.shipped` copy can be older than the lab's tool; a difference is not an upgrade. Keep source findings in research notes; save changes
 to the lab itself for a separate task.

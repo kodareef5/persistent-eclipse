@@ -10,8 +10,14 @@ echo '-- dsh'; node src/test-dsh.mjs "$dsh"
 echo '-- pi'; node src/test-pi.mjs "${2:-pi}"
 echo '-- cvss'; node src/test-cvss.mjs
 echo '-- lint'; node src/test-lint.mjs
+echo '-- status report'; node src/test-status-report.mjs
+echo '-- signals'; node src/test-signals.mjs
 echo '-- pack'; node src/test-pack.mjs
 echo '-- history'; node --test src/test-history.mjs
+echo '-- cells'; node --test src/test-cells.mjs
+echo '-- lab status'; node --test src/test-lab-status.mjs
 echo '-- integrity'; node --test src/test-integrity.mjs
 echo '-- retry'; node --test src/test-retry.mjs
 echo '-- dsh retry'; node src/test-retry-dsh.mjs "$dsh"
+echo '-- dsh supervision'; node src/test-supervise-dsh.mjs "$dsh"
+echo '-- dsh web'; node src/test-dsh-client.mjs "$dsh"

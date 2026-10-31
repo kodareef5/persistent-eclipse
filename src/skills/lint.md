@@ -42,14 +42,14 @@ The shipped digest is `{{lint.sha256}}`. `sha256sum` also works; on Windows use
 `certutil -hashfile .research/tools/lint-notes.mjs SHA256`. Don't ask an unknown
 script for its own hash by running it.
 
-A different digest may just mean an older version. Compare it with the shipped copy:
+A different digest may mean either copy is older, or one was customized. Compare it with the shipped copy:
 
     diff .research/tools/lint-notes.mjs .research/tools/lint-notes.mjs.shipped
 
-For a known older version, record both digests in the commit message and let the
-operator know. You can keep using it or adopt the shipped version. Removing the old
-copy lets the runtime place the current one on the next open. If the differences
-are unexplained or remove useful checks, report them and set that copy aside.
+If the lab's copy is known to be older, adopt the verified newer one (pe-fleet, Updating tools) and record
+both digests in the commit message. Removing the old copy also lets the runtime place
+the current one on the next open. If the differences are unexplained or remove useful
+checks, report them to the operator before adopting.
 Researchers can continue with other checks while this is resolved.
 
 An old linter may reject `R-redfox-3`. That is a tool limitation; leave other labs'

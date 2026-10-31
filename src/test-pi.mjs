@@ -67,13 +67,15 @@ export default function(pi) {
 // A chat completions endpoint that can script real parent/worker conversations.
 const requests = []
 let answer = async () => 'ok'
+const isIdleReview = request => request.messages.some(m => typeof m.content === 'string' && m.content.startsWith('# Persistent Eclipse idle reviewer'))
+let reactionAnswer = async () => 'WAIT'
 const server = createServer((req, res) => {
   let body = ''
   req.on('data', d => { body += d })
   req.on('end', async () => {
     const request = JSON.parse(body || '{}')
     requests.push(request)
-    const response = await answer(request)
+    const response = await (isIdleReview(request) ? reactionAnswer(request) : answer(request))
     if (res.destroyed) return
     if (response.error) {
       res.writeHead(response.status ?? 400, {'content-type': 'application/json'})
@@ -210,22 +212,44 @@ const code = readFileSync(join(src, 'cvss.mjs'), 'utf8').trimEnd() + '\n'
 const lint = readFileSync(join(src, 'lint-notes.mjs'), 'utf8').trimEnd() + '\n'
 const packer = readFileSync(join(src, 'pack.mjs'), 'utf8').trimEnd() + '\n'
 const history = readFileSync(join(src, 'history.mjs'), 'utf8').trimEnd() + '\n'
+const status = readFileSync(join(src, 'status-report.mjs'), 'utf8').trimEnd() + '\n'
+const ledger = readFileSync(join(src, 'ledger.mjs'), 'utf8').trimEnd() + '\n'
 const research = readFileSync(join(src, 'research.md'), 'utf8').trim()
-const missionText = Object.fromEntries(['red-team', 'blue-team', 'math-team'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8').trimEnd() + '\n']))
+const missionText = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8').trimEnd() + '\n']))
 const expand = text => Object.entries(missionText).reduce((t, [mode, m]) => t.replace(`{{mission:${mode}}}`, m), text)
   .replace('{{pe_research}}', research)
   .replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', createHash('sha256').update(code).digest('hex'))
   .replace('{{lint.mjs}}', lint).replace('{{lint.sha256}}', createHash('sha256').update(lint).digest('hex'))
   .replace('{{pack.mjs}}', packer).replace('{{pack.sha256}}', createHash('sha256').update(packer).digest('hex'))
   .replace('{{history.mjs}}', () => history).replace('{{history.sha256}}', createHash('sha256').update(history).digest('hex'))
-// A skill's {{table:<file>}} slots take src/skills/<name>/<file>.md, trimmed.
-const tables = (name, text) => text.replace(/\{\{table:([a-z0-9][a-z0-9.-]*)\}\}/g, (_, t) => readFileSync(join(src, 'skills', name, t + '.md'), 'utf8').trim())
+  .replace('{{status-report.mjs}}', () => status).replace('{{status-report.sha256}}', createHash('sha256').update(status).digest('hex'))
+  .replace('{{ledger.mjs}}', () => ledger).replace('{{ledger.sha256}}', createHash('sha256').update(ledger).digest('hex'))
+// A skill's {{table:<file>}} slots take src/skills/<name>/<file>.md, trimmed. A
+// {{sample:<file>[:n]}} keeps the text before its first row and n rows (three by
+// default), then points at notes/<file>.md; a {{note:<file>}} names that path.
+const sample = (text, n, path) => {
+  const lines = text.trim().split('\n'), out = []
+  const table = lines.some(l => l.startsWith('| --- ') || l.startsWith('|---'))
+  let seen = 0
+  lines.forEach((line, i) => {
+    const row = /^(\| |- |\* |[0-9]+\. )/.test(line) && !(table && (line.startsWith('| --- ') || lines[i + 1]?.startsWith('| --- ')))
+    if (row) { if (++seen <= n) out.push(line) } else if (!seen) out.push(line)
+  })
+  const more = seen - Math.min(seen, n)
+  return out.join('\n') + (more ? `\n\n*+${more} more in \`${path}\`.*` : `\n\n*More in \`${path}\`.*`)
+}
+// A note may keep its own extension, as a script to copy (hn-collect.mjs).
+const noteName = (kind, t) => kind === 'note' && t.endsWith('.mjs') ? t : t + '.md'
+const tables = (name, text) => text.replace(/\{\{(table|sample|note):([a-z0-9][a-z0-9.-]*?)(?::([1-9][0-9]*))?\}\}/g, (_, kind, t, n) => {
+  const file = readFileSync(join(src, 'skills', name, noteName(kind, t)), 'utf8')
+  return kind === 'table' ? file.trim() : kind === 'note' ? `\`notes/${noteName(kind, t)}\`` : sample(file, Number(n ?? 3), `notes/${t}.md`)
+})
 const want = Object.fromEntries(readdirSync(join(src, 'skills')).filter(f => f.endsWith('.md')).map(f => {
   const text = expand(tables(f.slice(0, -3), readFileSync(join(src, 'skills', f), 'utf8')))
   return [text.match(/^name: (.*)$/m)[1], { description: text.match(/^description: (.*)$/m)[1], body: body(text) }]
 }))
 const personaTemplate = expand(readFileSync(join(src, 'persona.md'), 'utf8').trim())
-const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8')]))
+const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8')]))
 const withMission = mission => personaTemplate.replace('{{pe_mission}}', () => mission)
 const persona = withMission(missions['blue-team'])
 const listed = system => [...system.matchAll(/<skill>\s*<name>(.*?)<\/name>\s*<description>([\s\S]*?)<\/description>\s*<location>(.*?)<\/location>/g)]
@@ -247,6 +271,20 @@ try {
       await until(() => notified(s, 'Loaded runtime SHA-256:'));
       check(notified(s, 'runtime hashes unverified (no package Git baseline)'),
         'version: command reports copied packages as unverified and exposes the runtime fingerprint');
+      // The installed runtime changes under a running session: the manager hears once that
+      // a reload is needed, not just the operator's footer.
+      const cells = join(pkg, 'src', 'cells.mjs'), original = readFileSync(cells, 'utf8')
+      writeFileSync(cells, original + '// updated on disk\n')
+      try {
+        await s.rpc({type: 'prompt', message: '/pe-version'})
+        await until(() => notified(s, 'reload needed'))
+        let heard = 0
+        answer = async request => { heard += JSON.stringify(request.messages).split('a reload is needed').length - 1; return 'Noted.' }
+        await s.prompt('Carry on.')
+        await s.rpc({type: 'prompt', message: '/pe-version'})
+        await s.prompt('Carry on again.')
+        check(heard === 2 /* the one notice, seen in both requests' history */, 'update: a runtime changed on disk tells the manager once to wind down and ask for a reload', `heard ${heard}`)
+      } finally { writeFileSync(cells, original) }
     } finally { await s.close(); }
   }
 
@@ -307,6 +345,16 @@ try {
     if (!/^---\nname: [a-z-]+\ndescription: "/.test(file)) throw new Error(`${s.name}: frontmatter is not quoted`)
   }
   ok('lab: every skill file matches src/skills')
+  // Field notes sit beside the skill that names them, byte for byte, to read on demand.
+  for (const s of skills) {
+    const named = [...readFileSync(join(src, 'skills', s.name.replace(/^pe-/, '') + '.md'), 'utf8').matchAll(/\{\{(sample|note):([a-z0-9][a-z0-9.-]*?)(?::[0-9]+)?\}\}/g)].map(m => noteName(m[1], m[2]))
+    for (const t of named) {
+      const note = join(dirname(s.location), 'notes', t)
+      if (!existsSync(note) || readFileSync(note, 'utf8') !== readFileSync(join(src, 'skills', s.name.replace(/^pe-/, ''), t), 'utf8').trimEnd() + '\n')
+        throw new Error(`${s.name}: notes/${t} is missing or differs from src/skills`)
+    }
+  }
+  ok('lab: every field note sits beside its skill, matching src/skills')
 
   check(!existsSync(join(lab, '.research/local/sessions')), 'history: --no-session does not retain the manager conversation')
   {
@@ -332,7 +380,7 @@ try {
     const file = join(lab, '.research', 'tools', name)
     return readFileSync(file, 'utf8') === readFileSync(join(repo, 'src', src), 'utf8')
   }
-  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && placedTool('history.mjs', 'history.mjs') && !existsSync(join(notLab, '.research', 'tools')),
+  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && placedTool('history.mjs', 'history.mjs') && placedTool('status-report.mjs', 'status-report.mjs') && placedTool('ledger.mjs', 'ledger.mjs') && !existsSync(join(notLab, '.research', 'tools')),
     'lab: the linter, calculator, and packer are placed in the lab, and nowhere else')
 
   // With no OpenRouter key, search fails with a request to the operator, not silence.
@@ -452,7 +500,7 @@ try {
 
   // Operator additions, including replacement metacharacters and a distant final
   // instruction, must reach the manager and a fresh reporter intact.
-  for (const [n, mode] of ['red-team', 'blue-team', 'math-team'].entries()) {
+  for (const [n, mode] of ['red-team', 'blue-team', 'math-team', 'signals'].entries()) {
     const file = join(lab, '.research', 'MISSION.md')
     const complete = missions[mode] + '\n## Operator additions\n' + 'Keep this exact condition, including $& and {{literal}}.\n'.repeat(250) + 'FINAL_MISSION_REQUIREMENT\n'
     writeFileSync(file, complete)
@@ -471,8 +519,9 @@ try {
     check(reporterRequests.length > 0 && reporterRequests.every(r => parse(r).system.includes(complete) && parse(r).system.includes(want['pe-reporter'].body) &&
       !JSON.stringify(r.messages).includes('PRIVATE_PARENT_HISTORY')), `${mode}: a fresh reporter receives the entire mission and its reporting skill`,
       reporterRequests.length ? undefined : JSON.stringify(managerRequests.at(-1)?.messages.slice(-2)))
-    const guide = mode === 'math-team' ? 'pe-math' : mode === 'blue-team' ? 'pe-patch' : undefined
+    const guide = mode === 'math-team' ? 'pe-math' : mode === 'blue-team' ? 'pe-patch' : mode === 'signals' ? 'pe-hunt' : undefined
     if (guide) check(reporterRequests.every(r => parse(r).system.includes(want[guide].body)), `${mode}: reporter inherits the mission's artifact guidance`)
+    if (mode === 'math-team') check(reporterRequests.every(r => /pe-math's notes\/ folder: \S+pe-math\/notes/.test(parse(r).system)), 'math-team: a worker given pe-math knows where its field notes are')
     answer = async () => 'ok'
   }
   rmSync(join(lab, '.research', 'MISSION.md')) // The remaining tests also cover labs with no recorded mission.
@@ -593,8 +642,8 @@ try {
       await s.prompt('/goal Read the fixture and document every required fact.')
       let state = await s.snapshot(), entries = await s.branch()
       check(state.phase === 'complete' && state.roundsStarted === 2 && state.maxGoalRounds === 256 && rounds(entries).length === 2 &&
-        rounds(entries).every(r => r.display === false) && rounds(entries)[0].content.includes('<goal_round>') && rounds(entries)[0].content.includes('Round: 1/256'),
-        'goals: /goal continues the same session in hidden rounds until the model marks it complete')
+        rounds(entries).every(r => r.display === true) && rounds(entries)[0].content.includes('<goal_round>') && rounds(entries)[0].content.includes('Round: 1/256'),
+        'goals: /goal continues the same session in visible rounds until the model marks it complete')
 
       // The model creates a goal from a direct operator request; the cap blocks it.
       stage = 0
@@ -1159,7 +1208,7 @@ try {
   // Ages run 100 minutes in 3.3 s here.
   if (process.platform !== 'win32') {
     stage = 0
-    let launched = false, readGoal = false, completedGoal = false
+    let launched = false, lingered = false, readGoal = false, completedGoal = false
     answer = async request => {
       const id = workerId(request)
       if (id) {
@@ -1176,6 +1225,8 @@ try {
         if (!readGoal) { readGoal = true; return tool('get_goal', {}) }
         if (!completedGoal) { completedGoal = true; return updateGoal(request, 'complete') }
       }
+      // The manager works a while beside its workers: the gap travels only during turns.
+      if (launched && !lingered) { lingered = true; await new Promise(r => setTimeout(r, 1500)) }
       return 'Manager keeps working.'
     }
     const terminalProbe = `
@@ -1204,7 +1255,7 @@ try:
         colors = {m for m in re.findall(chr(27) + re.escape('[') + '([0-9;]*)m[⠀-⣿]', output.decode('utf-8', 'replace'))}
         middle_free = any(len(s) == 4 and s[1] == '⣀' and all(s[i] != '⣀' for i in [0, 2, 3]) for s in slots)
         finished = 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +3 !1' in text and 'goal complete' in text
-        if orbiting and len(colors) >= 5 and middle_free and 'goal active' not in text and finished:
+        if orbiting and len(colors) >= 5 and middle_free and '· goal active' not in text and finished:
             print('ok   workers and goals: real TUI shows braille stacks ramping through the age colors with a traveling gap, stable slots, counts, and only a goal state that needs a look')
             break
     else:
@@ -1221,7 +1272,8 @@ finally:
 `
     const ageFile = join(pkg, 'src', 'cells.mjs'), unaged = readFileSync(ageFile, 'utf8')
     check(unaged.includes('export const AGE_FULL_MS = 100 * 60_000;'), 'workers: a worker cell blinks dark red at 100 minutes')
-    writeFileSync(ageFile, unaged.replace('export const AGE_FULL_MS = 100 * 60_000;', 'export const AGE_FULL_MS = 3300;'))
+    check(unaged.includes('IDLE_MS = 60_000;'), 'workers: between turns the footer refreshes once a minute')
+    writeFileSync(ageFile, unaged.replace('export const AGE_FULL_MS = 100 * 60_000;', 'export const AGE_FULL_MS = 3300;').replace('IDLE_MS = 60_000;', 'IDLE_MS = 100;'))
     let terminalOutput = '', code
     try {
       const probe = spawn('python3', ['-c', terminalProbe, pi, lab], {cwd: scratch, env: {...env, TERM: 'xterm-256color'}, stdio: ['ignore', 'pipe', 'pipe']})
@@ -1232,9 +1284,9 @@ finally:
 
     // The name's news ticker, with its timings shortened in this isolated package.
     const extensionFile = join(pkg, 'extension.ts'), extension = readFileSync(extensionFile, 'utf8')
-    const timing = 'const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120;'
-    check(extension.includes(timing), 'footer news: production ticker rests three minutes and steps every 120 ms')
-    writeFileSync(extensionFile, extension.replace(timing, 'const NEWS_FIRST = 500, NEWS_REST = 60_000, NEWS_PAUSE = 400, NEWS_STEP = 40;'))
+    const timing = 'const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120, NEWS_IDLE_REST = 10 * 60_000;'
+    check(extension.includes(timing), 'footer news: the ticker plays every three minutes during turns, at most every ten between them, and steps every 120 ms')
+    writeFileSync(extensionFile, extension.replace(timing, 'const NEWS_FIRST = 500, NEWS_REST = 60_000, NEWS_PAUSE = 400, NEWS_STEP = 40, NEWS_IDLE_REST = 60_000;'))
     const newsLab = join(scratch, 'news-lab')
     mkdirSync(join(newsLab, '.research', 'notes'), {recursive: true})
     writeFileSync(join(newsLab, '.research', 'LAB.md'), '# Lab\n')
@@ -1301,10 +1353,17 @@ finally:
     const tidyLab = join(scratch, 'housekeeping-lab')
     mkdirSync(join(tidyLab, '.research'), { recursive: true })
     writeFileSync(join(tidyLab, '.research', 'LAB.md'), '# lab\n\n    Housekeeping: 5s\n')
-    let stage = 0, reminded = 0
+    mkdirSync(join(tidyLab, '.research', 'tools'), { recursive: true })
+    writeFileSync(join(tidyLab, '.research', 'tools', 'old-tool.mjs'), '// old\n')
+    writeFileSync(join(tidyLab, '.research', 'tools', 'old-tool.mjs.shipped'), '// fixed\n')
+    let stage = 0, reminded = 0, reported = 0, asked = false, waiting = false
     answer = async request => {
-      const seen = request.messages.filter(m => m.role === 'user' && JSON.stringify(m.content).includes('<housekeeping>')).length
+      const said = tag => request.messages.filter(m => m.role === 'user' && JSON.stringify(m.content).includes(tag)).length
+      const seen = said('<housekeeping>')
       reminded = Math.max(reminded, seen)
+      reported = Math.max(reported, said('<status_report>'))
+      waiting ||= request.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('Lab tools differ from runtime copies: old-tool.mjs') && JSON.stringify(m.content).includes('the runtime copy may be older'))
+      asked ||= request.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('<housekeeping>') && JSON.stringify(m.content).includes('pe-status-report'))
       switch (stage++) {
         case 0: return tool('create_goal', {objective: 'Run one slow experiment.'})
         case 1: return tool('bash', {command: 'sleep 6'})
@@ -1315,6 +1374,41 @@ finally:
     }
     await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'Keep at the slow experiment until it is done.'], tidyLab)
     check(reminded === 1, 'goals: a long goal gets one housekeeping reminder between turns at the lab interval', `saw ${reminded} reminders after ${stage} requests`)
+    check(waiting, 'goals: housekeeping names differing runtime copies without assuming they are upgrades')
+    check(asked && reported === 1, 'goals: housekeeping and completing the goal each ask for a status report, once', `asked ${asked}, ${reported} status report prompts after ${stage} requests`)
+  }
+  // Reloading and resuming don't push the reminder back: its clock lives in the session.
+  {
+    const tidyLab = join(scratch, 'housekeeping-reload-lab')
+    mkdirSync(join(tidyLab, '.research'), { recursive: true })
+    writeFileSync(join(tidyLab, '.research', 'LAB.md'), '# lab\n\n    Housekeeping: 5s\n')
+    const held = deferred()
+    let stage = 0, remindedAt = 0, completed = false
+    answer = async request => {
+      if (workerId(request)) { await held.promise; return 'Worker done.' }
+      const seen = JSON.stringify(request.messages)
+      if (stage++ === 0) return tool('create_goal', {objective: 'Keep tidy across reloads.', max_goal_rounds: 30})
+      if (seen.includes('<housekeeping>')) {
+        remindedAt ||= Date.now()
+        if (!completed) { completed = true; return updateGoal(request, 'complete') }
+        return 'Tidied.'
+      }
+      if (stage === 2) return tool('pe_subagent', {taskId: 'T-1', task: 'Hold until the reload.'})
+      if (request.messages.at(-1).role === 'tool') return 'Still working.'
+      return tool('bash', {command: 'sleep 0.5'})
+    }
+    const s = goalSession(tidyLab)
+    try {
+      const began = Date.now()
+      await s.prompt('Start the tidy goal.')
+      await new Promise(r => setTimeout(r, 3000))
+      await s.rpc({type: 'prompt', message: '/pe-test-reload'})
+      await s.rpc({type: 'prompt', message: '/goal resume'})
+      await until(() => completed)
+      check(remindedAt - began < 7500, 'goals: a reload and resume keep the housekeeping clock', `reminded after ${remindedAt - began} ms`)
+      check((await s.branch()).some(e => e.type === 'custom_message' && e.customType === 'pe-housekeeping' && e.display === true),
+        'goals: the housekeeping check is shown in the chat log')
+    } finally { await s.close(); held.resolve(); answer = async () => 'ok' }
   }
   // Real worker launches and archiving, with a clock offset only for completion
   // age in this isolated package. Runtime timers and the six-hour rule stay intact.
@@ -1414,26 +1508,29 @@ finally:
     writeFileSync(extensionFile, extension.replace('const IDLE_REVIEW_MS = 15 * 60_000;', `const IDLE_REVIEW_MS = ${idleMs};`))
     const sleep = ms => new Promise(r => setTimeout(r, ms))
     let sequence = 0
-    async function fixture({workers = 2, slots = 4, goal = true, cap = 8, headless = false} = {}) {
+    async function fixture({workers = 2, slots = 4, goal = true, cap = 8, headless = false, stuck = false, earlyFinish = true, housekeeping = false} = {}) {
       const dir = join(scratch, `idle-review-${sequence++}`)
       mkdirSync(join(dir, '.research'), {recursive: true})
-      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: ${slots}\n`)
+      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: ${slots}\n${housekeeping ? 'Housekeeping: 5s\n' : ''}`)
       const release = Array.from({length: workers}, deferred)
       const busy = deferred(), busyStarted = deferred()
       let stage = 0, authorityTried = false, authorityDenied = false, completing = false
-      const reviews = new Map(), completions = []
+      const reviews = new Map(), completions = [], nudged = new Set()
       answer = async request => {
         const id = workerId(request)
         if (id) {
-          if (headless && workers > 1 && id === 'T-1') await sleep(idleMs / 3)
+          const seen = JSON.stringify(request.messages)
+          if (seen.includes('REVIEW_INTERRUPT')) { nudged.add(id); return 'Wrapped up with what I have.' }
+          if (stuck) return tool('bash', {command: 'sleep 30'})
+          if (headless && earlyFinish && workers > 1 && id === 'T-1') await sleep(idleMs / 3)
           else await release[Number(id.slice(2)) - 1].promise
           return 'Worker finished.'
         }
         const user = parse(request).user
         if (user.includes('PE worker T-1 completed')) completions.push(Date.now())
-        if (user.includes('<fleet_check>')) {
+        if (user.includes('<fleet_check>') || user.includes('<housekeeping>')) {
           // Each check adds one message to the conversation; a tool call repeats the same one.
-          const nth = JSON.stringify(request.messages).split('<fleet_check>').length - 1
+          const nth = JSON.stringify(request.messages).split(/<fleet_check>|<housekeeping>/).length - 1
           if (!reviews.has(nth)) reviews.set(nth, {at: Date.now(), text: user})
           if (headless) {
             if (!completing) { completing = true; return updateGoal(request, 'complete') }
@@ -1445,6 +1542,8 @@ finally:
           return 'The workers are still useful. Keep waiting.'
         }
         if (user === 'BUSY_MANAGER') { busyStarted.resolve(); await busy.promise; return 'Finished my own check; keep waiting.' }
+        if (user === 'INTERRUPT_WORKER' && request.messages.at(-1).role === 'user')
+          return tool('pe_send_message', {taskId: 'T-1', message: 'REVIEW_INTERRUPT: finish with the evidence so far.', interrupt: true})
         if (user === 'FINISH_GOAL') {
           if (!completing) { completing = true; return updateGoal(request, 'complete') }
           return 'Goal complete.'
@@ -1455,7 +1554,7 @@ finally:
         }
         if (stage === (goal ? 1 : 0)) {
           stage++
-          return {tools: release.map((_, i) => ['pe_subagent', {taskId: `T-${i + 1}`, task: `Wait for experiment ${i + 1}.`}])}
+          return {tools: release.map((_, i) => ['pe_subagent', {taskId: `T-${i + 1}`, task: `Wait for experiment ${i + 1}. The manager approves a three-hour run.`}])}
         }
         return 'Waiting for evidence.'
       }
@@ -1465,7 +1564,7 @@ finally:
       }
       const s = goalSession(dir)
       await s.prompt('Run the experiment.')
-      return {s, reviews, release, busy, busyStarted, authorityDenied: () => authorityDenied,
+      return {s, reviews, release, busy, busyStarted, nudged, authorityDenied: () => authorityDenied,
         close: async () => { await s.close(); release.forEach(r => r.resolve()); busy.resolve() }}
     }
     try {
@@ -1479,6 +1578,8 @@ finally:
           'idle review: two free slots wake the manager with worker context and permission to wait')
         check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
           'idle review: the nudge spends no round and cannot pause with operator authority')
+        check((await f.s.branch()).some(e => e.type === 'custom_message' && e.customType === 'pe-fleet-check' && e.display === true),
+          'idle review: the fleet check is shown in the chat log under its own label')
         await f.s.rpc({type: 'prompt', message: 'BUSY_MANAGER'})
         await f.busyStarted.promise
         await sleep(idleMs + 300)
@@ -1506,10 +1607,22 @@ finally:
           await until(() => red.reviews.size === 1)
           const text = [...red.reviews.values()][0].text
           check(text.includes("while a worker's footer cell is red") && text.includes('1/4 slots free') &&
-            /footer (red|dark red|blinking dark red): inspect it/.test(text),
-            'idle review: a red worker wakes a full fleet and is named for inspection')
+            text.includes('Red: T-1, T-2, T-3.') && text.includes('thinking for') && red.nudged.size === 0,
+            'idle review: red workers wake a full fleet at the idle check, each named to look at, none stopped', text)
         } finally { await red.close() }
+        const stuck = await fixture({workers: 1, stuck: true})
+        try {
+          await stuck.s.prompt('INTERRUPT_WORKER')
+          await until(() => stuck.nudged.size === 1)
+          check(true, 'workers: explicit interrupt stops a command and continues the worker with the message')
+        } finally { await stuck.close() }
+        const headlessRed = await fixture({workers: 3, headless: true, earlyFinish: false})
+        check([...headlessRed.reviews.values()].some(r => r.text.includes('Red: T-')),
+          'idle review: a red worker wakes headless Pi before any worker finishes')
       } finally { writeFileSync(cellsFile, young) }
+      const tidy = await fixture({workers: 3, headless: true, earlyFinish: false, housekeeping: true})
+      check([...tidy.reviews.values()].some(r => r.text.includes('<housekeeping>') && r.text.includes('come up for air')),
+        'housekeeping: a due check takes the idle moment and wakes headless Pi before any worker finishes')
       for (const config of [{workers: 3}, {workers: 1, slots: 2}, {goal: false}]) {
         const f = await fixture(config)
         try {
@@ -1562,6 +1675,172 @@ finally:
     } finally {
       writeFileSync(extensionFile, extension)
     }
+  }
+  // Fresh-context reactions at manager settlement, independent of free worker slots.
+  {
+    let sequence = 0
+    const suggestion = 'Try a detour around the rejected boundary case; inspect its assumption before treating the objection as settled.'
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    async function fixture({reply = suggestion, goal = true, off = false, held = false, headless = false, reasoner = false, shared = false} = {}) {
+      const dir = join(scratch, `idle-reaction-${sequence++}`)
+      mkdirSync(join(dir, '.research'), {recursive: true})
+      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: 1\n${off ? 'Idle review: off\n' : ''}`)
+      writeFileSync(join(dir, '.research', 'MISSION.md'), 'Mode: math-team\nKeep the operator mission intact. Investigate the boundary case.\n')
+      writeFileSync(join(dir, '.research', 'SCOPE.md'), 'Only the supplied construction.\n')
+      writeFileSync(join(dir, '.research', 'STATUS.md'), 'The boundary case was dismissed without testing its default.\n')
+      if (shared) {
+        execFileSync('git', ['init', '-q'], {cwd: dir}); execFileSync('git', ['config', 'pe.lab', 'redfox'], {cwd: dir})
+        writeFileSync(join(dir, '.research', 'QUEUE.md'), 'Pointer: see labs/<lab>/QUEUE.md.\n')
+        mkdirSync(join(dir, '.research', 'labs', 'redfox'), {recursive: true})
+        writeFileSync(join(dir, '.research', 'labs', 'redfox', 'QUEUE.md'), 'OWN_QUEUE: T-1 boundary test.\n')
+      }
+      const worker = deferred(), reaction = deferred()
+      let stage = 0, sawReaction = 0, denied = false, completing = false, relaunch = false
+      const reviews = [], workerRequests = []
+      reactionAnswer = async request => {
+        reviews.push(request)
+        if (held) await reaction.promise
+        return typeof reply === 'string' ? {text: reply, usage: {prompt_tokens: 200, completion_tokens: 30, total_tokens: 230}} : reply
+      }
+      answer = async request => {
+        if (workerId(request)) { workerRequests.push(workerId(request)); await worker.promise; return 'Worker done.' }
+        const user = parse(request).user
+        if (user === suggestion) {
+          sawReaction++
+          if (headless) {
+            if (!completing) { completing = true; return updateGoal(request, 'complete') }
+            worker.resolve()
+          } else if (request.messages.at(-1).role === 'user') return updateGoal(request, 'pause')
+          denied ||= toolResults(request).includes('requires a direct request from the operator')
+          return 'I will read the boundary assumption while the worker continues.'
+        }
+        if (relaunch) { relaunch = false; return tool('pe_subagent', {taskId: 'T-2', task: 'Continue the experiment after reload.'}) }
+        if (goal && stage === 0) { stage++; return tool('create_goal', {objective: 'Find the actual boundary.', max_goal_rounds: 3}) }
+        if (stage === (goal ? 1 : 0)) { stage++; return tool('pe_subagent', {taskId: 'T-1', task: 'Test the boundary.'}) }
+        return 'The worker is checking the construction; I will wait for evidence.'
+      }
+      if (headless) {
+        try { await run(['-p', '--no-session', '--provider', 'probe', '--model', 'probe', 'PRIVATE_EARLIER_TURN: investigate the boundary.'], dir) }
+        finally { worker.resolve(); reaction.resolve() }
+        return {reviews, sawReaction: () => sawReaction}
+      }
+      const s = goalSession(dir)
+      if (reasoner) {
+        await s.rpc({type: 'set_model', provider: 'probe', modelId: 'reasoner'})
+        await s.rpc({type: 'set_thinking_level', level: 'low'})
+      }
+      await s.prompt('PRIVATE_EARLIER_TURN: investigate the boundary.')
+      return {dir, s, reviews, worker, reaction, workerRequests, denied: () => denied, sawReaction: () => sawReaction,
+        relaunch: () => { relaunch = true },
+        close: async () => { await s.close(); worker.resolve(); reaction.resolve(); reactionAnswer = async () => 'WAIT' }}
+    }
+    const f = await fixture()
+    try {
+      await until(() => f.denied())
+      const request = f.reviews[0], state = JSON.parse(parse(request).user)
+      check(f.reviews.length === 1 && request.messages.length === 2 && (request.tools ?? []).length === 0 && request.model === 'probe' &&
+        !JSON.stringify(request).includes('PRIVATE_EARLIER_TURN') && state.mission.includes('Keep the operator mission intact.') &&
+        state.scope.includes('Only the supplied construction.') && state.workers.length === 1 && state.latestReply.includes('wait for evidence'),
+        'idle reaction: fresh tool-free context inherits the model and carries mission, limits, last reply, and a full fleet')
+      check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
+        'idle reaction: advice spends no round and has no operator authority')
+      await f.s.prompt('Keep considering the boundary.')
+      await sleep(150)
+      check(f.reviews.length === 1, 'idle reaction: replies and operator activity do not create a review loop')
+      const usage = reportData(f.dir).usage
+      check(usage.sessions.some(s => s.role === 'idle-review') && usage.rows.some(r => r.sums.input >= 200),
+        'idle reaction: its transcript and reported usage enter lab history')
+      await f.s.rpc({type: 'prompt', message: '/pe-test-reload'})
+      f.relaunch()
+      await f.s.rpc({type: 'prompt', message: '/goal resume'})
+      await until(() => f.workerRequests.includes('T-2'))
+      await sleep(150)
+      check(f.reviews.length === 1, 'idle reaction: cooldown survives reload and explicit goal resume')
+    } finally { await f.close() }
+
+    const shared = await fixture({shared: true, reply: 'WAIT'})
+    try {
+      await until(() => shared.reviews.length === 1)
+      const state = JSON.parse(parse(shared.reviews[0]).user)
+      check(state.labName === 'redfox' && state.queue.file === '.research/labs/redfox/QUEUE.md' && state.queue.text.includes('OWN_QUEUE') &&
+        state.status.file === '.research/STATUS.md' && !('cadence' in state) && !('fleet' in state),
+        "idle reaction: a shared lab reads this clone's own queue, names each file, and omits missing ones", JSON.stringify(state).slice(0, 600))
+    } finally { await shared.close() }
+    const inherited = await fixture({reasoner: true, reply: 'WAIT'})
+    try {
+      await until(() => inherited.reviews.length === 1)
+      check(inherited.reviews[0].model === 'reasoner' && inherited.reviews[0].reasoning_effort === 'low',
+        'idle reaction: reviewer inherits the exact manager model and effort')
+    } finally { await inherited.close() }
+
+    const extensionFile = join(pkg, 'extension.ts'), original = readFileSync(extensionFile, 'utf8')
+    try {
+      writeFileSync(extensionFile, original.replace('const IDLE_REACTION_MS = 15 * 60_000;', 'const IDLE_REACTION_MS = 1000;'))
+      const repeated = await fixture()
+      try {
+        await until(() => repeated.denied())
+        await sleep(1100)
+        await repeated.s.prompt('Consider the evidence again.')
+        await until(() => repeated.reviews.length >= 2)
+        await sleep(150)
+        const prior = JSON.parse(parse(repeated.reviews[1]).user).recentReactions
+        check(prior.includes(suggestion) && (await repeated.s.branch()).filter(e => e.type === 'custom_message' && e.customType === 'pe-idle-reaction').length === 1,
+          'idle reaction: later reviews see prior advice and exact repeats are not delivered')
+      } finally { await repeated.close() }
+      writeFileSync(extensionFile, original.replace('setTimeout(() => controller.abort(), 90_000)', 'setTimeout(() => controller.abort(), 200)'))
+      const timed = await fixture({held: true})
+      try {
+        await until(() => timed.reviews.length === 1)
+        const logs = join(timed.dir, '.research/local/idle-reviews')
+        await until(() => readdirSync(logs).some(f => readFileSync(join(logs, f), 'utf8').includes('"stopReason":"aborted"')))
+        timed.reaction.resolve()
+        await sleep(150)
+        check(timed.reviews.length === 1 && !(await timed.s.branch()).some(e => e.type === 'custom_message' && e.customType === 'pe-idle-reaction'),
+          'idle reaction: timeout aborts the request without waking the manager or retrying')
+      } finally { await timed.close() }
+    } finally { writeFileSync(extensionFile, original) }
+
+    for (const reply of ['WAIT.', 'x'.repeat(601), {status: 402, error: 'Review quota unavailable'}]) {
+      const quiet = await fixture({reply})
+      try {
+        await until(() => quiet.reviews.length === 1)
+        await sleep(300)
+        const entries = await quiet.s.branch()
+        check(!entries.some(e => e.type === 'custom_message' && e.customType === 'pe-idle-reaction') && quiet.reviews.length === 1,
+          `idle reaction: ${typeof reply === 'string' ? reply === 'WAIT.' ? 'WAIT stays silent' : 'oversized replies are skipped' : 'failure has no retry or fallback'}`)
+      } finally { await quiet.close() }
+    }
+    for (const config of [{goal: false}, {off: true}]) {
+      const quiet = await fixture(config)
+      try {
+        await sleep(200)
+        check(quiet.reviews.length === 0, `idle reaction: disabled with ${config.off ? 'Idle review: off' : 'no armed goal'}`)
+      } finally { await quiet.close() }
+    }
+    for (const action of ['operator', 'pause', 'worker', 'reload', 'model']) {
+      const stale = await fixture({held: true})
+      try {
+        await until(() => stale.reviews.length === 1)
+        if (action === 'operator') await stale.s.prompt('Read another boundary while waiting.')
+        if (action === 'pause') await stale.s.rpc({type: 'prompt', message: '/goal pause'})
+        if (action === 'worker') {
+          stale.worker.resolve()
+          await until(() => stale.s.events.some(e => e.type === 'message_end' && e.message?.customType === 'pe-worker' && e.message?.details?.status === 'completed'))
+        }
+        if (action === 'reload') await stale.s.rpc({type: 'prompt', message: '/pe-test-reload'})
+        if (action === 'model') await stale.s.rpc({type: 'set_model', provider: 'alternate', modelId: 'scout'})
+        stale.reaction.resolve()
+        await sleep(300)
+        const delivered = (await stale.s.branch()).some(e => e.type === 'custom_message' && e.customType === 'pe-idle-reaction')
+        check(action === 'worker' ? delivered : !delivered, action === 'worker'
+          ? 'idle reaction: a manager busy with a worker result still gets the advice'
+          : `idle reaction: discard stale advice after ${action}`)
+      } finally { await stale.close() }
+    }
+    const headless = await fixture({headless: true})
+    check(headless.reviews.length === 1 && headless.sawReaction() > 0,
+      'idle reaction: headless manager receives advice while its full fleet still runs')
+    reactionAnswer = async () => 'WAIT'
   }
   answer = async () => 'ok'
 } catch (e) { failed = e }
