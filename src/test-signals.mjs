@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const src = dirname(fileURLToPath(import.meta.url));
-const collect = join(src, "skills", "forecast", "hn-collect.mjs");
+const collect = join(src, "..", "packs", "signals", "skills", "forecast", "hn-collect.mjs");
 const ledgerTool = join(src, "ledger.mjs");
 const scratch = mkdtempSync(join(tmpdir(), "pe-signals-tools-"));
 const run = promisify(execFile);
@@ -344,7 +344,7 @@ try {
     mkdirSync(join(lab, ".research", "notes"), { recursive: true });
     mkdirSync(join(lab, ".research", "intel"), { recursive: true });
     writeFileSync(join(lab, ".research", "LAB.md"), "# lab\n\nCommits: research\nExecution: local\n");
-    const example = readFileSync(join(src, "skills", "hunt", "lead-note.md"), "utf8");
+    const example = readFileSync(join(src, "..", "packs", "signals", "skills", "hunt", "lead-note.md"), "utf8");
     const blocks = [...example.matchAll(/```markdown\n([\s\S]*?)```/g)].map((m) => m[1]);
     const note = blocks.find((b) => b.startsWith("---\nid: R-14"));
     const extract = blocks.find((b) => b.startsWith("# Fictional processing-capacity announcement"));

@@ -60,6 +60,18 @@ put('STATUS.md', 'Work continued.\n')
 run = pack('plan', 'p1'); plan = readPlan()
 check(run.status === 0 && file('intel/paper.pdf').origin === 'https://example.org/paper.pdf' && file('intel/paper.pdf').summary && file('intel/paper.pdf').action === 'reference',
   'plan: refresh preserves origins, summaries, and choices')
+put('updates/new.md', '# An observation added after the plan\n')
+put('intel/paper.txt', 'line ONE\nline two\n')
+let changed = pack('build', 'p1')
+check(changed.status === 0 && changed.stdout.includes('Since plan, added:') && changed.stdout.includes('updates/new.md') &&
+  changed.stdout.includes('Since plan, modified:') && changed.stdout.includes('intel/paper.txt'),
+  'build: names additions and same-size edits since the plan', changed.stdout + changed.stderr)
+const changedOut = join(lab, 'changed')
+pack('verify', zipFile, '--extract', changedOut)
+const changedManifest = JSON.parse(readFileSync(join(changedOut, 'manifest.json'), 'utf8'))
+check(changedManifest.sincePlan.added.includes('updates/new.md') && changedManifest.sincePlan.modified.includes('intel/paper.txt'),
+  'build: the exported manifest retains plan drift for its reader')
+put('intel/paper.txt', 'line one\nline two\n')
 run = pack('build', 'p1')
 check(run.status === 0 && existsSync(zipFile) && !run.stderr.includes('home directory'), 'build: packages without rewriting evidence URLs', run.stderr)
 const first = readFileSync(zipFile)

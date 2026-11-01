@@ -5,11 +5,18 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { indexSession, captureSearch, scheduleReport } from "./src/history.mjs";
+import { reportData, activityView, activityMarkdown, indexSession, captureSearch, scheduleReport, historyEnabled } from "./src/history.mjs";
 import { installRetry } from "./src/retry-pi.ts";
 import { createIntegrityCheck } from "./src/integrity.mjs";
 import { labRoot, labFile, localConfig, syncTarget, mailbox, quietly, DISK_EVERY, size, freeSpace } from "./src/lab-status.mjs";
 import { row, tint, age, ageNote, AGE_INSPECT, STEP_MS, IDLE_MS } from "./src/cells.mjs";
+import contentRuntime from "./src/content.cjs";
+import supervision from "./src/supervision.cjs";
+import questions from "./src/questions.cjs";
+import record from "./src/record.cjs";
+import tools from "./src/tools.cjs";
+import { normalizeCacheControl, cacheLimitedRoute } from "./src/cache-control.mjs";
+import { scheduleSync, syncStatus, pendingSyncNotice, acknowledgeSyncNotice } from "./src/sync.mjs";
 import { Type, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, VERSION,
 	type AgentSession, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -62,11 +69,12 @@ Load a skill by reading its file.
 - Between worker results, keep the lab moving in short stretches you can drop when a
   worker needs you: read recent notes and other labs' work, check the queue, run a web
   search, or steer a worker with a fresh idea.
-- During an armed goal, fifteen idle minutes with workers running and at least two
-  free slots, or a red worker, bring a brief fleet check naming any red workers. It
+- During an armed goal, five idle minutes with workers running and any free
+  slot bring a capacity check. Twenty minutes without observed progress brings
+  an inspection prompt naming the worker and its last activity. It
   never interrupts a turn and uses no goal round. Investigate, delegate, or keep
-  waiting; empty slots need no made-up work. While you keep waiting, checks slow to
-  every 30 minutes, then hourly.
+  waiting when it protects useful work. Keep researchers inspired; use the opportunity
+  to look deeply. Repeated unchanged checks slow to fifteen, then thirty minutes.
 - The lab runs while Pi runs; there is no scheduling heartbeat. Use \`rg\` in
   \`bash\` for grep/glob tasks, and use only tools Pi lists.
 - Use \`/pe [request]\` to start or continue a lab, and \`/goal\` to steer goals.`;
@@ -79,7 +87,7 @@ const IDLE_REACTION_MS = 15 * 60_000;
 // Room for the reviewer's reasoning; the reaction itself stays short.
 const REACTION_TOKENS = 16_000;
 // Each check the manager waits through doubles the next interval, up to four times.
-const idleDelay = (waited: number) => IDLE_REVIEW_MS * 2 ** Math.min(waited, 2);
+const idleDelay = (waited: number, text = "") => supervision.delay(text, waited);
 const GOAL_POLICY = `create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed. When a human asks to continue or resume a disarmed, paused, or blocked goal, in any wording or language, use update_goal action resume. Mark complete only when the objective is actually achieved. Mark blocked only after the same blocking condition persists for at least ${BLOCKED_AFTER} consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.`;
 
 type Skill = { name: string; description: string; filePath: string; baseDir: string };
@@ -90,78 +98,11 @@ const checkIntegrity = createIntegrityCheck(packageRoot);
 const yml = readFileSync(join(packageRoot, "cordis.patch.yml"), "utf8");
 const historyMeta = { runtimeVersion: VERSION, node: process.version, harnessVersion: JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8")).version,
 	harnessSha256: createHash("sha256").update(yml).digest("hex") };
-const lines = yml.split("\n");
-
-// The body of the YAML literal block (`|` or `|-`) that starts after line i.
-function literal(i: number): string {
-	const out: string[] = [];
-	let pad = -1;
-	for (let j = i + 1; j < lines.length; j++) {
-		const line = lines[j];
-		if (!line.trim()) { out.push(""); continue; }
-		const indent = line.length - line.trimStart().length;
-		if (pad < 0) pad = indent;
-		if (indent < pad) break;
-		out.push(line.slice(pad));
-	}
-	while (out.length && !out[out.length - 1]) out.pop();
-	return out.join("\n") + (lines[i].trimEnd().endsWith("|-") ? "" : "\n");
-}
-
-const at = (re: RegExp) => {
-	const i = lines.findIndex((line) => re.test(line));
-	if (i < 0) throw new Error(`cordis.patch.yml has no line matching ${re}`);
-	return i;
-};
-
-const persona = literal(at(/^\s+prefix: \|-$/));
-// The mission a lab follows until it records its own MISSION.md.
-const defaultMission = literal(at(/^\s+mission: \|$/));
-
-// Each entry under `skills:` is a name line, a JSON description, and a content block.
-// The kickoff body has its own key, and its description is in the line that registers it.
-const indent = (line: string) => line.search(/\S/);
-// A skill's field notes follow its content under `notes:`, one literal block per file.
-const entries: { name: string; description: string; body: string; notes?: Record<string, string> }[] = [];
-const top = at(/^\s+skills:$/) + 1;
-for (let i = top; i < lines.length && (!lines[i].trim() || indent(lines[i]) >= indent(lines[top])); i++) {
-	if (indent(lines[i]) !== indent(lines[top])) continue;
-	const description = JSON.parse(lines[i + 1].trim().slice("description: ".length));
-	const notes: Record<string, string> = {};
-	for (let j = i + 2; j < lines.length && (!lines[j].trim() || indent(lines[j]) > indent(lines[top])); j++) {
-		if (lines[j].trim() !== "notes:" || indent(lines[j]) !== indent(lines[i + 1])) continue;
-		for (let k = j + 1; k < lines.length && (!lines[k].trim() || indent(lines[k]) > indent(lines[j])); k++) {
-			const file = indent(lines[k]) === indent(lines[j]) + 2 && /^\s+([A-Za-z0-9][A-Za-z0-9.-]*\.(?:md|mjs)): \|$/.exec(lines[k])?.[1];
-			if (file) notes[file] = literal(k);
-		}
-		break;
-	}
-	entries.push({ name: lines[i].trim().slice(0, -1), description, body: literal(i + 2), ...(Object.keys(notes).length ? { notes } : {}) });
-}
-const register = yml.match(/name: 'pe-kickoff', description: ("(?:[^"\\]|\\.)*")/);
-if (!register) throw new Error("cordis.patch.yml does not register pe-kickoff");
-entries.push({ name: "pe-kickoff", description: JSON.parse(register[1]), body: literal(at(/^\s+kickoff: \|$/)) });
-
-// Pi reads skills from files. Write each one with its description quoted, because the
-// source frontmatter is not always valid YAML.
-const root = join(tmpdir(), `persistent-eclipse-${createHash("sha256").update(yml).digest("hex").slice(0, 12)}`);
-function skills(): Skill[] {
-	return entries.map(({ name, description, body, notes }) => {
-		const baseDir = join(root, name);
-		const filePath = join(baseDir, "SKILL.md");
-		if (!existsSync(filePath)) {
-			mkdirSync(baseDir, { recursive: true });
-			const text = body.replace(/^---\n[\s\S]*?\n---\n/, "");
-			// Notes first, so a skill file that exists always has its notes beside it.
-			for (const [file, note] of Object.entries(notes ?? {})) {
-				mkdirSync(join(baseDir, "notes"), { recursive: true });
-				writeFileSync(join(baseDir, "notes", file), note);
-			}
-			writeFileSync(filePath, `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n${text}`);
-		}
-		return { name, description, filePath, baseDir };
-	});
-}
+const content = contentRuntime.createResolver({
+ runtime: true,
+ installedRoot: join(packageRoot, "packs"),
+});
+const skills = (cwd: string): Skill[] => content(cwd).entries;
 
 const inLab = (cwd: string) => !!labRoot(cwd);
 // Pi's worker concurrency is lab policy: `Workers: <n>` in LAB.md, or this clone's
@@ -180,7 +121,7 @@ function labState(cwd: string): string {
 	const lab = labRoot(cwd), file = lab && join(lab, ".research", "MISSION.md");
 	return `${lab ?? ""}\n${file && existsSync(file) ? readFileSync(file, "utf8") : ""}`;
 }
-const WORKER_TOOLS = ["pe_subagent", "pe_send_message", "pe_list_agents", "pe_archive_agents", "pe_interrupt_agent", "pe_list_models"];
+const WORKER_TOOLS = ["pe_subagent", "pe_send_message", "pe_list_agents", "pe_archive_agents", "pe_interrupt_agent", "pe_list_models", "pe_question"];
 const GOAL_TOOLS = ["get_goal", "create_goal", "update_goal"];
 const SEARCH_TOOL = "pe_web_search";
 // Pi has no web search of its own. This one asks OpenRouter's web plugin, using the
@@ -231,14 +172,15 @@ It's been about ${span(every)}: a sanity check. At a good pause, come up for air
 Clear your head and reevaluate: is the lab still chasing the most useful question?
 - Tidy finished scratch work and update the task list and lab notes. The lab folder uses ${disk || "an unmeasured amount of disk"}. Keep anything still in use, cited, or waiting to be saved; pe-fleet has cleanup details. Commit loose ends and sync if enabled.
 - Use pe_archive_agents to remove eligible old completed workers from the fleet list; this preserves their artifacts and history.
-${tools.length ? `- Lab tools differ from runtime copies: ${tools.join(", ")} (a \`.shipped\` copy beside each). Compare versions before replacing anything; the runtime copy may be older. See pe-fleet.\n` : ""}- File a lab status report for the operator with pe-status-report, and commit it.
+${tools.length ? `- Lab tools differ from runtime copies: ${tools.join(", ")} (a \`.shipped\` copy beside each). Compare versions before replacing anything; the runtime copy may be older. See pe-fleet.\n` : ""}- Use pe-status-report to add useful changes for the operator; existing evidence can be linked rather than retold.
 - Is there an idea we dismissed too quickly? Give one or two to a fresh reader who goes back to the source or proof. Leave room for new work too.
 - If it's been a while, try pe-muse or a web round. Follow a promising angle with a researcher.
+${supervision.nudge('housekeeping')}
 Then go back to the question you choose.
 </housekeeping>`;
 // When a goal completes, the lab reports to the operator: pe-status-report.
 const REPORT_PROMPT = `<status_report>
-The goal is complete. File this lab's status report for the operator with pe-status-report.
+The goal is complete. Use pe-status-report to add what the result changes for the operator, with its evidence. Existing coverage needs no duplicate report.
 It is filed once committed, and pushed when sync is on.
 </status_report>`;
 
@@ -249,7 +191,7 @@ const NAME = "Persistent Eclipse", NEWS_GAP = "   ", NEWS_MAX = 64;
 const NEWS_FIRST = 20_000, NEWS_REST = 3 * 60_000, NEWS_PAUSE = 3000, NEWS_STEP = 120, NEWS_IDLE_REST = 10 * 60_000;
 const result = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
 type Job = {
-	id: string; slot: number; skill: string; task: string; mission: string; folder: string; started: number; ended?: number;
+	id: string; slot: number; skill: string; task: string; mission: string; content: ReturnType<typeof content>; folder: string; started: number; ended?: number;
 	model: NonNullable<ExtensionContext["model"]>; thinkingLevel?: ExtensionContext["thinkingLevel"];
 	status: "running" | "completed" | "failed" | "cancelled"; activity: string; since: number;
 	archived?: boolean; nudge?: string;
@@ -261,30 +203,15 @@ type Job = {
 function placeTools(cwd: string): void {
 	const lab = labRoot(cwd);
 	if (!lab) return;
-	const dir = join(lab, ".research", "tools");
-	const shipped: [string, string][] = [["lint-notes.mjs", "pe-lint"], ["cvss.mjs", "pe-cvss"], ["pack.mjs", "pe-export"], ["history.mjs", "pe-history"], ["status-report.mjs", "pe-status-report"], ["ledger.mjs", "pe-forecast"]];
-	for (const [name, skill] of shipped) {
-		const body = entries.find((e) => e.name === skill)?.body.match(new RegExp("```js " + name + "\\n([\\s\\S]*?)^```", "m"))?.[1];
-		if (body === undefined) continue;
-		const file = join(dir, name);
-		try {
-			if (!existsSync(file)) {
-				mkdirSync(dir, { recursive: true });
-				writeFileSync(file, body);
-			} else if (readFileSync(file, "utf8") !== body) {
-				// Preserve older or customized tools; leave the shipped copy for comparison.
-				const ref = `${file}.shipped`;
-				if (!existsSync(ref) || readFileSync(ref, "utf8") !== body) writeFileSync(ref, body);
-			}
-		} catch {
-			// A read-only lab is the operator's call, not a reason to break the session.
-		}
-	}
+	const shipped = ["lint-notes.mjs", "cvss.mjs", "pack.mjs", "history.mjs", "activity.mjs", "status-report.mjs", "ledger.mjs", "content.cjs", "questions.cjs", "record.cjs", "sync.mjs", "pack-defaults.json", "push-check.mjs"];
+	tools.place(lab, Object.fromEntries(shipped.map(name => [name, readFileSync(join(packageRoot, "src", name), "utf8")])));
 }
 
 const roundPrompt = (g: Goal) => `<goal_round>
 Objective: ${JSON.stringify(g.objective)}
 Round: ${g.roundsStarted}/${g.maxGoalRounds}
+
+${supervision.nudge('round', g.roundsStarted)}
 
 Continue working toward the objective in this same session. Treat the current workspace, tool results, and durable session state as authoritative; inspect them instead of assuming earlier narration is still current. Make concrete progress and verify the result. Before claiming completion, gather evidence that the whole objective is achieved, read the current goal, and mark it complete. If work remains, leave the goal active for the next round. Follow the configured goal-tool policy before reporting a blocker.
 </goal_round>`;
@@ -295,19 +222,35 @@ export default function (pi: ExtensionAPI) {
 		return !!lab && !/^[ \t]*Retry:[ \t]*off(?:[ \t(]|$)/im.test(labFile(lab));
 	};
 	installRetry(pi, retryEnabled);
+	pi.on("before_provider_request", (event, ctx) => inLab(ctx.cwd) && cacheLimitedRoute(ctx.model) ? normalizeCacheControl(event.payload) : undefined);
 	let historyWarned = false;
 	const historyError = (ctx: ExtensionContext, error: unknown) => {
 		if (!historyWarned) ctx.ui.notify(`PE history could not update: ${error instanceof Error ? error.message : error}`, "warning");
 		historyWarned = true;
 	};
 	const historyStarts = new Map<string, number>();
+	const historyTurns = new Map<string, string>();
+	pi.on("agent_start", (_event, ctx) => {
+		const lab = labRoot(ctx.cwd);
+		if (!lab || !ctx.sessionManager.getSessionFile() || !historyEnabled(lab)) return;
+		const id = randomUUID();
+		historyTurns.set(ctx.sessionManager.getSessionId(), id);
+		pi.appendEntry("pe-turn", {id, phase: "start", time: Date.now()});
+	});
+	pi.on("agent_end", (_event, ctx) => {
+		const session = ctx.sessionManager.getSessionId(), id = historyTurns.get(session);
+		if (!id) return;
+		pi.appendEntry("pe-turn", {id, phase: "end", time: Date.now()});
+		historyTurns.delete(session);
+		keepHistory(ctx);
+	});
 	const keepHistory = (ctx: ExtensionContext, force = false) => {
 		const lab = labRoot(ctx.cwd);
 		if (!lab || !ctx.sessionManager.getSessionFile()) return;
 		try {
 			const id = ctx.sessionManager.getSessionId(), entries = ctx.sessionManager.getEntries();
 			if (!historyStarts.has(id)) historyStarts.set(id, entries.length);
-			indexSession(lab, ctx.sessionManager.getHeader(), ctx.sessionManager.getSessionFile(), {...historyMeta, role: "manager", observedFrom: historyStarts.get(id)});
+			indexSession(lab, ctx.sessionManager.getHeader(), ctx.sessionManager.getSessionFile(), {...historyMeta, ...content(lab).meta, role: "manager", observedFrom: entries.length});
 			return scheduleReport(lab, force).catch(error => historyError(ctx, error));
 		} catch (error) {
 			historyError(ctx, error);
@@ -336,8 +279,13 @@ export default function (pi: ExtensionAPI) {
 				pi.sendMessage({ customType: "pe-update", display: true, content: `PE: the installed Persistent Eclipse changed since this session loaded it (${report.loaded.commit?.slice(0, 7) ?? "unversioned"} → ${report.installed.commit?.slice(0, 7) ?? "unversioned"}), so a reload is needed. A reload stops running workers. At a good pause, wind down as pe-fleet's "Updating tools and the runtime" describes: no new long workers, ask running ones to save their progress, commit, then ask the operator to reload.` },
 					{ deliverAs: "nextTurn" });
 			}
-			if (explicit || report.summary !== integrityNotice)
-				ctx.ui.notify(explicit ? report.detail : report.summary, report.warning ? "warning" : "info");
+			if (explicit || report.summary !== integrityNotice) {
+				const lab = labRoot(ctx.cwd), state = lab && syncStatus(lab);
+				const details = explicit ? [report.detail, ...contentRuntime.provenanceStatus(ctx.cwd),
+					state && `Sync: ${state.state}${state.viewsPending ? " (generated views await a convenient fast-forward)" : ""}`,
+					state?.notice, state?.error, ...(state?.advice || []).map(p => `Advice: ${p}`)].filter(Boolean).join("\n") : report.summary;
+				ctx.ui.notify(details, report.warning ? "warning" : "info");
+			}
 			integrityNotice = report.summary;
 			refresh();
 		})().catch(() => {
@@ -502,12 +450,12 @@ export default function (pi: ExtensionAPI) {
 	function mission(cwd: string): string {
 		const lab = labRoot(cwd);
 		const file = lab && join(lab, ".research", "MISSION.md");
-		const text = file && existsSync(file) ? readFileSync(file, "utf8") : defaultMission;
+		const text = file && existsSync(file) ? readFileSync(file, "utf8") : content(cwd).defaultMission;
 		if (!text.trim()) throw new Error("Persistent Eclipse MISSION.md is empty.");
 		return text;
 	}
 	const active = (cwd: string) => started || inLab(cwd);
-	const offered = (cwd: string) => (inLab(cwd) ? skills() : started ? skills().filter((s) => s.name === "pe-kickoff") : []);
+	const offered = (cwd: string) => (inLab(cwd) ? skills(cwd) : started ? skills(cwd).filter((s) => s.name === "pe-kickoff") : []);
 	const running = () => [...jobs.values()].filter((j) => j.status === "running");
 	// Map insertion order is launch order, including launches in the same millisecond.
 	// Keep archived records for task-ID uniqueness, completed totals, and this ordering.
@@ -660,7 +608,7 @@ export default function (pi: ExtensionAPI) {
 				receipt.appendCustomEntry("pe-idle-review", { systemPrompt: idleReviewPrompt, parentSession: ctx.sessionManager.getSessionId() });
 				const message = { role: "user" as const, content: snapshot, timestamp: Date.now() };
 				receipt.appendMessage(message);
-				indexSession(lab, receipt.getHeader(), receipt.getSessionFile(), { ...historyMeta, role: "idle-review", observedFrom: 0 });
+				indexSession(lab, receipt.getHeader(), receipt.getSessionFile(), { ...historyMeta, ...content(lab).meta, role: "idle-review", observedFrom: 0 });
 				const response = await ctx.modelRegistry.streamSimple(model, { systemPrompt: idleReviewPrompt, messages: [message], tools: [] },
 					{ reasoning: ctx.thinkingLevel, maxTokens: Math.min(model.maxTokens || REACTION_TOKENS, REACTION_TOKENS), signal: controller.signal, sessionId: receipt.getSessionId() }).result();
 				receipt.appendMessage(response);
@@ -688,12 +636,15 @@ export default function (pi: ExtensionAPI) {
 	function scheduleIdleReview(ctx: ExtensionContext, wake?: () => void) {
 		cancelIdleReview();
 		const eligible = () => armed && goal?.phase === "active" && inLab(ctx.cwd) && running().length > 0;
-		const red = () => running().filter((j) => age(Date.now() - j.started).stage >= AGE_INSPECT);
-		// Two free slots may deserve new work; a worker the operator sees as red deserves a look.
-		const reason = () => slots - running().length >= 2 ? "with at least two free worker slots"
-			: red().length ? "while a worker's footer cell is red" : "";
+		const inspection = () => supervision.inspect({workers: running(), slots, text: labFile(labRoot(ctx.cwd)!)});
+		const red = () => inspection().stalled;
+		const reason = () => inspection().reason;
 		if (!eligible()) return;
-		const owner = generation, delay = idleDelay(waited);
+		const owner = generation, text = labFile(labRoot(ctx.cwd)!);
+		const baseDelay = idleDelay(waited, text), housekeeping = housekeepingEvery(labRoot(ctx.cwd)!);
+		const due = housekeeping ? Math.max(1, tidied + housekeeping - Date.now()) : Infinity;
+		const delay = Math.min(baseDelay || Infinity, due);
+		if (!Number.isFinite(delay)) return;
 		idleReview = setTimeout(() => {
 			idleReview = undefined;
 			if (owner !== generation || !eligible() || (wake && ctx.signal?.aborted)
@@ -712,8 +663,9 @@ Objective: ${JSON.stringify(goal!.objective)}
 The manager has been idle for ${span(delay)} ${why}.
 Now: ${slots - live.length}/${slots} slots free. Running workers (age, last observed activity):
 ${live.map(j => `- ${j.id}: ${elapsed(j.started)}; ${j.activity} for ${elapsed(j.since)}${ageNote(Date.now() - j.started)}; brief: ${j.task.slice(0, 240)}`).join("\n")}
-${red().length ? `\nRed: ${red().map((j) => j.id).join(", ")}. Take a look at each: its scratch, its transcript under session/, or a steer. pe_send_message with interrupt stops a stuck command so the worker reads you now.\n` : ""}
-Briefly check whether these experiments are still useful and whether an independent question deserves attention. You may investigate, delegate, steer a worker, or keep waiting. Age alone is not evidence of failure. Do not stop work or invent tasks just to fill slots. If waiting is appropriate, end this turn; the next check comes after ${span(idleDelay(waited))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
+${red().length ? `\nProgress to inspect: ${red().map((j) => j.id).join(", ")}. Take a look at each: its scratch, its transcript under session/, or a steer. pe_send_message with interrupt stops a stuck command so the worker reads you now.\n` : ""}
+${supervision.nudge('capacity', waited - 1)}
+Give available researchers distinct questions worth pursuing. Inspect missing progress without assuming a long command or provider wait is failure. You may investigate, delegate, steer a worker, or wait when that protects useful work. If waiting is appropriate, end this turn; the next check comes after ${span(idleDelay(waited))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
 </fleet_check>`;
 			pi.sendMessage({ customType: "pe-fleet-check", content: check, display: true }, { triggerTurn: true });
 			wake?.();
@@ -742,17 +694,28 @@ Briefly check whether these experiments are still useful and whether an independ
 			const parts = [theme.fg("muted", nameArea(now)),
 				`${cells} ${theme.fg(done ? "success" : "dim", `+${done}`)}${failed ? ` ${theme.fg("error", `!${failed}`)}` : ""}`];
 			// A goal running as armed is the quiet default, and its objective is news.
-			if (goal && !(goal.phase === "active" && armed)) {
-				const label = `goal ${goal.phase === "active" && !armed ? "awaiting resume" : goal.phase}`;
+			if (goal) {
+				const label = `⚑ ${goal.phase === "active" && !armed ? "awaiting resume" : goal.phase}`;
 				parts.push(goal.phase === "complete" ? theme.fg("success", label)
 					: goal.phase === "blocked" ? theme.fg("error", label)
 					: goal.phase === "paused" || !armed ? theme.fg("warning", label) : blue(label));
+			}
+			if (remote.lab) {
+				const open = questions.list(remote.lab).filter(q => q.status === "open").length;
+				if (open) parts.push(blue(`? ${open}`));
+				const state = syncStatus(remote.lab);
+				if (state.state === "manual") parts.push(theme.fg("muted", "sync manual"));
+				else if (state.state === "synced") parts.push(theme.fg("muted", state.automatic ? "sync auto" : "sync manual"));
+				else if (state.state === "waiting") parts.push(theme.fg("muted", `sync ↓${state.behind}`));
+				if (state.advice?.length) parts.push(theme.fg("muted", `sync advice ${state.advice.length}`));
+				if (["pending", "needs-merge", "needs-review"].includes(state.state)) parts.push(theme.fg("warning", `sync ${state.state}`));
 			}
 			if (remote.received || remote.sent) {
 				const mail = `✉ ↓${remote.received} ↑${remote.sent}`;
 				parts.push(remote.open ? blue(mail) : theme.fg("muted", mail));
 			}
-			const shared = [remote.bytes && size(remote.bytes), remote.behind && `+${remote.behind}`, remote.ahead && `${remote.ahead} to push`].filter(Boolean);
+			const viewsOnly = remote.lab && syncStatus(remote.lab).viewsPending;
+			const shared = [remote.bytes && size(remote.bytes), !viewsOnly && remote.behind && `+${remote.behind}`, remote.ahead && `${remote.ahead} to push`].filter(Boolean);
 			// ⎇ is git's branch mark for the lab remote, ⛁ a stack of platters for the local disk:
 			// plain Unicode, so they render through system fallback fonts without a Nerd Font.
 			if (shared.length) parts.push(theme.fg("muted", `⎇ ${shared.join(" ")}`));
@@ -784,7 +747,7 @@ Briefly check whether these experiments are still useful and whether an independ
 			measure(root);
 			watch(root);
 			// Between turns, a quiet timer keeps the cells current; it never keeps Pi alive.
-			tick ??= setInterval(() => { if (remote.lab) { measure(remote.lab); watch(remote.lab); } }, DISK_EVERY);
+			tick ??= setInterval(() => { if (remote.lab) { measure(remote.lab); watch(remote.lab); void scheduleSync(remote.lab); } }, DISK_EVERY);
 			tick.unref?.();
 		} else {
 			disk.lab = disk.text = "";
@@ -837,13 +800,14 @@ Briefly check whether these experiments are still useful and whether an independ
 			const cwd = requireLab(ctx);
 			// A skill pasted into the prompt names its notes folder, since there is no file to resolve against.
 			const body = (name: string) => {
-				const entry = entries.find((s) => s.name === name)!;
-				return entry.notes ? `${entry.body}\n(${name}'s notes/ folder: ${join(root, name, "notes")})\n` : entry.body;
+				const entry = job.content.entries.find((s) => s.name === name);
+				if (!entry) throw new Error(`Skill ${name} is not in this mission pack.`);
+				return entry.notes ? `${entry.body}\n(${name}'s notes/ folder: ${join(job.content.root, name, "notes")})\n` : entry.body;
 			};
 			const guide = /^Mode: math(?:-team)?$/m.test(job.mission) ? "pe-math" : /^Mode: blue-team$/m.test(job.mission) ? "pe-patch"
 				: /^Mode: signals$/m.test(job.mission) ? "pe-hunt" : undefined;
 			const scratch = relative(cwd, job.folder);
-			const others = skills().map((s) => `- ${s.name}: ${s.filePath}`).join("\n");
+			const others = job.content.entries.map((s) => `- ${s.name}: ${s.filePath}`).join("\n");
 			const role = `# Persistent Eclipse worker ${job.id}
 You are a trusted researcher sharing the lab's mission. Pursue the question in your
 brief, follow useful leads, and use any available tool. Skills suggest approaches;
@@ -867,6 +831,9 @@ directly; use pe-web's other routes if search is unavailable. Keep useful receip
 external publication needs authorization.
 
 Return what you learned, the evidence or artifact paths, and what remains uncertain.
+Follow a useful surprise far enough to understand what it opens up. If a route
+is blocked, explain the obstruction precisely and look for a representation or
+question it leaves open. Share a promising next attempt when it helps the lab.
 A concise answer is enough for a small task; use id: draft if you prepare a claim note.
 Finish scratch edits before your final answer. PE saves it as answer.md and marks
 completion with .done, so do not create a second report just to repeat the answer.
@@ -874,6 +841,11 @@ completion with .done, so do not create a second report just to repeat the answe
 PE skills, readable on demand:
 ${others}
 \n## Complete inherited mission\n${job.mission}\n${body("pe-git-research")}\n${job.skill === "pe-git-research" ? "" : body(job.skill)}\n${guide && guide !== job.skill ? body(guide) : ""}
+
+## Questions
+Use pe_question when an operator decision would help. Include what depends on the
+answer, leave that action pending, and continue independent investigation. The
+manager's runtime forwards the question from your scratch area to the inbox.
 
 ## Worker handoff
 Write lab artifacts and proposed record changes only in ${scratch}/.
@@ -886,7 +858,7 @@ IDs, merges shared records, lints, and commits. Full tool access does not change
 who writes the shared record.`;
 			const loader = new DefaultResourceLoader({
 				cwd, agentDir: getAgentDir(), noSkills: true, noPromptTemplates: true,
-				extensionFactories: [worker => installRetry(worker, retryEnabled, (text, error) => {
+				extensionFactories: [worker => { worker.on("before_provider_request", event => cacheLimitedRoute(job.model) ? normalizeCacheControl(event.payload) : undefined); installRetry(worker, retryEnabled, (text, error) => {
 					job.activity = text;
 					job.since = Date.now();
 					refresh();
@@ -895,7 +867,7 @@ who writes the shared record.`;
 					if (error && owner === generation) pi.sendMessage({ customType: "pe-worker", display: true,
 						content: `PE worker ${job.id} is waiting on its provider (${route(job)}): ${error.slice(0, 400)}\nIt retries on its own (${text}). Interrupt it, or tell the operator, if the cause will not clear by waiting.`,
 						details: { taskId: job.id, status: "waiting", folder: job.folder } }, { deliverAs: "steer" });
-				})],
+				}); }],
 				systemPromptOverride: () => role, appendSystemPromptOverride: () => [],
 				// Retain other installed hooks, but never load PE's manager into a worker.
 				extensionsOverride: (base) => ({ ...base, extensions: base.extensions.filter((e) => !e.tools.has("pe_subagent")) }),
@@ -905,7 +877,17 @@ who writes the shared record.`;
 			if (errors.length) throw new Error(`PE worker extensions failed to load: ${errors.map((e) => e.error).join("; ")}`);
 			if (job.stop) throw new Error(job.stop);
 			const { session } = await createAgentSession({ cwd, model, thinkingLevel,
-				resourceLoader: loader, tools: ["*"], customTools: [searchTool(job.folder)],
+				resourceLoader: loader, tools: ["*"], customTools: [searchTool(job.folder), {
+          name: "pe_question", label: "Question for the operator",
+          description: "Leave a question while continuing independent work. This does not grant permission.",
+          parameters: Type.Object({question: Type.String(), affected: Type.Optional(Type.String()), proposedDefault: Type.Optional(Type.String())}),
+          async execute(_id, args) {
+            const q = questions.draft(job.folder, {...args, author: "worker", task: job.id});
+            questions.integrate(cwd, job.folder);
+            refresh();
+            return result(JSON.stringify(q));
+          }
+        }],
 				// Keep the transcript beside the draft, so a failed or odd worker can be read later.
 				sessionManager: SessionManager.create(cwd, join(job.folder, "session")) });
 			job.session = session;
@@ -914,7 +896,7 @@ who writes the shared record.`;
 				job.thinkingLevel = session.thinkingLevel;
 				try {
 					indexSession(cwd, session.sessionManager.getHeader(), session.sessionManager.getSessionFile(),
-						{...historyMeta, role: "worker", observedFrom: 0, taskId: job.id, parentSession: ctx.sessionManager.getSessionId()});
+						{...historyMeta, ...job.content.meta, role: "worker", workType: job.skill, observedFrom: 0, taskId: job.id, parentSession: ctx.sessionManager.getSessionId()});
 					scheduleReport(cwd).catch(error => historyError(ctx, error));
 				} catch (error) {
 					if (!historyWarned) ctx.ui.notify(`PE worker history could not update: ${error instanceof Error ? error.message : error}`, "warning");
@@ -934,8 +916,18 @@ who writes the shared record.`;
 			job.model = session.model ?? job.model;
 			job.thinkingLevel = session.thinkingLevel;
 			if (job.stop) throw new Error(job.stop);
+			let historyTurn: string | undefined;
 			unsubscribe = session.subscribe((event) => {
+				if (event.type === "agent_start" && historyEnabled(cwd)) {
+					historyTurn = randomUUID();
+					session.sessionManager.appendCustomEntry("pe-turn", {id: historyTurn, phase: "start", time: Date.now()});
+				}
+				if (event.type === "agent_end" && historyTurn) {
+					session.sessionManager.appendCustomEntry("pe-turn", {id: historyTurn, phase: "end", time: Date.now()});
+					historyTurn = undefined;
+				}
 				if (event.type === "turn_end" || event.type === "agent_end") keepWorkerHistory();
+				if (event.type === "message_update" || event.type === "tool_execution_update") { job.since = Date.now(); }
 				if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 					job.activity = event.type === "tool_execution_start" ? event.toolName : "thinking";
 					job.since = Date.now();
@@ -980,7 +972,7 @@ who writes the shared record.`;
 		} finally {
 			if (job.session) {
 				try { indexSession(requireLab(ctx), job.session.sessionManager.getHeader(), job.session.sessionManager.getSessionFile(),
-					{...historyMeta, role: "worker", observedFrom: 0, taskId: job.id, parentSession: ctx.sessionManager.getSessionId()}); } catch { /* the live callback reports capture failures */ }
+					{...historyMeta, ...job.content.meta, role: "worker", workType: job.skill, observedFrom: 0, taskId: job.id, parentSession: ctx.sessionManager.getSessionId()}); } catch { /* the live callback reports capture failures */ }
 			}
 			unsubscribe?.();
 			await job.session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -1024,7 +1016,8 @@ who writes the shared record.`;
 			slots = workerLimit(cwd);
 			if (running().length >= slots) throw new Error(`All ${slots} PE worker slots are busy (Workers: in .research/LAB.md). Keep working until a completion notice arrives.`);
 			if (jobs.has(taskId)) throw new Error(`PE task ID ${taskId} has already been used.`);
-			if (!entries.some((s) => s.name === skill)) throw new Error(`Unknown PE skill: ${skill}.`);
+			const snapshot = content(cwd);
+			if (!snapshot.entries.some((s) => s.name === skill)) throw new Error(`Unknown PE skill: ${skill}.`);
 			const direction = mission(ctx.cwd);
 			const scratch = join(cwd, ".research", "scratch");
 			if (realpathSync(join(cwd, ".research")) !== join(cwd, ".research")) throw new Error("PE research must be a real directory inside the lab.");
@@ -1033,7 +1026,7 @@ who writes the shared record.`;
 			const folder = join(scratch, taskId);
 			mkdirSync(folder); // Never reuse an existing task or overwrite its evidence.
 			const slot = Array.from({ length: slots }, (_, i) => i).find((i) => !running().some((j) => j.slot === i))!;
-			const job: Job = { id: taskId, slot, skill, task, model, thinkingLevel, mission: direction, folder, started: Date.now(), status: "running", activity: "starting", since: Date.now(), messages: [], work: Promise.resolve() };
+			const job: Job = { id: taskId, slot, skill, task, model, thinkingLevel, mission: direction, content: snapshot, folder, started: Date.now(), status: "running", activity: "starting", since: Date.now(), messages: [], work: Promise.resolve() };
 			jobs.set(taskId, job);
 			waited = 0;
 			job.work = work(job, task, ctx);
@@ -1168,7 +1161,7 @@ who writes the shared record.`;
 				const { engine, mode, sources = [], usage } = found ?? {};
 				const receipt = join(receiptDir ?? join(lab, ".research", "intel"), `search-${retrieved.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.json`);
 				mkdirSync(dirname(receipt), { recursive: true });
-				writeFileSync(receipt, JSON.stringify({ query, model: SEARCH_MODEL, engine, mode, retrieved, sources, attempts, usage }, null, 2) + "\n", { flag: "wx" });
+				writeFileSync(receipt, JSON.stringify({ query, ...content(lab).meta, model: SEARCH_MODEL, engine, mode, retrieved, sources, attempts, usage }, null, 2) + "\n", { flag: "wx" });
 				try { captureSearch(lab, receipt); } catch { /* the original receipt remains beside the result */ }
 				if (signal?.aborted) throw signal.reason ?? new Error("Search cancelled.");
 				const failures = attempts.filter(a => a.error);
@@ -1249,7 +1242,7 @@ who writes the shared record.`;
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		started = false; restoreGoal(ctx); keepHistory(ctx); reportInterrupted(ctx);
+		started = false; restoreGoal(ctx); keepHistory(ctx); confirmReported(ctx);
 		void inspectPlugin(ctx);
 		if (integrityTimer) clearInterval(integrityTimer);
 		integrityTimer = setInterval(() => { void inspectPlugin(ctx); }, 60 * 60_000);
@@ -1268,27 +1261,54 @@ who writes the shared record.`;
 			} catch { /* a read-only lab keeps its transcript, which is enough to recover from */ }
 		}
 	}
-	function reportInterrupted(ctx: ExtensionContext) {
+	function interruptionDigest(file: string) {
+		return createHash("sha256").update(readFileSync(file)).digest("hex");
+	}
+	function interruptedMessage(ctx: ExtensionContext) {
+		confirmReported(ctx);
 		const lab = labRoot(ctx.cwd), scratch = lab && join(lab, ".research", "scratch");
 		if (!scratch || !existsSync(scratch)) return;
 		const cut = readdirSync(scratch).filter((id) => /^T-[1-9][0-9]*$/.test(id) && existsSync(join(scratch, id, ".interrupted")));
-		if (!cut.length) return;
-		const lines = cut.map((id) => {
-			const task = /## Task\n\n([\s\S]*)$/.exec(readFileSync(join(scratch, id, "interrupted.md"), "utf8"))?.[1].trim().split("\n")[0] ?? "";
-			return `- ${id}: ${task.slice(0, 160)}`;
-		});
-		pi.sendMessage({ customType: "pe-interrupted", display: true, content: `PE: Pi stopped while ${cut.length} worker(s) ran. Each left interrupted.md, its partial work, and its transcript in scratch:\n${lines.join("\n")}\nRelaunch what is still useful under a new task ID, pointing the brief at that folder.` },
-			{ deliverAs: "nextTurn" });
-		reported = { scratch, ids: cut };
+		const interrupted: {id: string; digest: string}[] = [], lines: string[] = [];
+		for (const id of cut) {
+			try {
+				const file = join(scratch, id, "interrupted.md");
+				const task = /## Task\n\n([\s\S]*)$/.exec(readFileSync(file, "utf8"))?.[1].trim().split("\n")[0] ?? "";
+				interrupted.push({id, digest: interruptionDigest(file)});
+				lines.push(`- ${id}: ${task.slice(0, 160)}`);
+			} catch { /* Keep an incomplete marker available for recovery. */ }
+		}
+		if (!interrupted.length) return;
+		return {customType: "pe-interrupted", display: true, details: {interrupted},
+			content: `PE: Pi stopped while ${interrupted.length} worker(s) ran. Each left interrupted.md, its partial work, and its transcript in scratch:\n${lines.join("\n")}\nRelaunch what is still useful under a new task ID, pointing the brief at that folder.`};
 	}
-	// Clear the markers only once the notice is in the session. A Pi opened and closed
-	// again before any turn keeps them, and the next session reports them again.
-	let reported: { scratch: string; ids: string[] } | undefined;
 	function confirmReported(ctx: ExtensionContext) {
-		if (!reported || !ctx.sessionManager.getBranch().some((e) => e.type === "custom_message" && e.customType === "pe-interrupted")) return;
-		for (const id of reported.ids) rmSync(join(reported.scratch, id, ".interrupted"), { force: true });
-		reported = undefined;
+		const lab = labRoot(ctx.cwd);
+		if (!lab) return;
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom_message" || entry.customType !== "pe-interrupted") continue;
+			const items = (entry as any).details?.interrupted;
+			if (!Array.isArray(items)) continue;
+			for (const item of items) {
+				if (!item || typeof item.id !== "string" || !/^T-[1-9][0-9]*$/.test(item.id)) continue;
+				const folder = join(lab, ".research/scratch", item.id);
+				try {
+					if (existsSync(join(folder, ".interrupted")) && interruptionDigest(join(folder, "interrupted.md")) === item.digest)
+						rmSync(join(folder, ".interrupted"));
+				} catch { /* A read-only lab retains the recovery marker. */ }
+			}
+		}
 	}
+	// Reload can emit session_start more than once before a request. Deliver at
+	// the turn boundary instead of queuing a copy on every startup notification.
+	pi.on("before_agent_start", (_event, ctx) => {
+		const message = interruptedMessage(ctx);
+		if (message) return {message};
+	});
+	pi.on("message_start", (event, ctx) => {
+		if (event.message.role === "assistant") confirmReported(ctx);
+	});
+
 	pi.on("session_shutdown", async (event, ctx) => {
 		armed = false;
 		cancelReaction();
@@ -1377,6 +1397,14 @@ who writes the shared record.`;
 		confirmReported(ctx);
 		if (!inLab(ctx.cwd)) return;
 		keepHistory(ctx);
+		void scheduleSync(labRoot(ctx.cwd)!);
+		const lab = labRoot(ctx.cwd)!;
+		acknowledgeSyncNotice(lab, syncDeliveries(ctx));
+		questions.acknowledge(lab, ctx.sessionManager.getBranch()
+			.filter(e => e.type === "custom_message" && e.customType === "pe-answer")
+			.map(e => (e as any).details?.delivery));
+		try { record.refresh(lab); }
+		catch (error) { ctx.ui.notify(`Report needs review: ${String(error)}`, "warning"); }
 		placeTools(ctx.cwd);
 		sync(ctx);
 		housekeep(ctx);
@@ -1396,10 +1424,15 @@ who writes the shared record.`;
 		sync(ctx);
 		if (!active(ctx.cwd)) return;
 		placeTools(ctx.cwd);
+		keepHistory(ctx);
 		const options = event.systemPromptOptions;
-		options.sections.persistent_eclipse = `${persona.replace("{{pe_mission}}", () => mission(ctx.cwd))}\n\n${PI_NOTE}`;
+		const snapshot = content(ctx.cwd);
+		options.sections.persistent_eclipse = `${snapshot.persona.replace("{{pe_mission}}", () => mission(ctx.cwd))}\n\n${PI_NOTE}`;
+		options.sections.pe_lab_guidance = contentRuntime.conventionStatus(ctx.cwd, snapshot).text;
+		options.sections.pe_content_warning = snapshot.warnings.join("\n");
 		options.sections.pe_goal = `## Goal policy\n${GOAL_POLICY}\n\n${goalText()}`;
 		// A lab made during this session has no discovered skills yet, so list them here.
+		options.skills = options.skills.filter(s => !s.name.startsWith("pe-"));
 		const listed = new Set(options.skills.map((s) => s.name));
 		for (const s of offered(ctx.cwd)) {
 			if (listed.has(s.name)) continue;
@@ -1410,10 +1443,94 @@ who writes the shared record.`;
 			});
 		}
 	});
-	pi.on("turn_start", () => { cancelIdleReview(); if (!busy) { busy = true; refresh(); } });
+	const syncDeliveries = (ctx: ExtensionContext) => ctx.sessionManager.getBranch()
+		.filter(e => e.type === "custom_message" && e.customType === "pe-sync")
+		.map(e => (e as any).details?.delivery);
+	const syncMessage = (ctx: ExtensionContext) => {
+		const lab = labRoot(ctx.cwd), notice = lab && pendingSyncNotice(lab, syncDeliveries(ctx));
+		return notice ? {customType: "pe-sync", display: true, details: {delivery: notice.id},
+			content: `PE sharing status:\n${notice.text}`} : undefined;
+	};
+	pi.on("message_start", (event, ctx) => {
+		// Starting the assistant means preceding context is in the transcript.
+		// Persist delivery before a long request can be interrupted or restarted.
+		const lab = labRoot(ctx.cwd);
+		if (lab && event.message.role === "assistant") acknowledgeSyncNotice(lab, syncDeliveries(ctx));
+	});
+	pi.on("before_agent_start", (_event, ctx) => {
+		const message = syncMessage(ctx);
+		if (message) return {message};
+	});
+	// Goal rounds and queued completions can continue without before_agent_start.
+	// Join their boundary; a status change alone never requests another turn.
+	pi.on("agent_before_settle", (event, ctx) => {
+		if (event.outcome !== "completed" || !(event.continue || ctx.hasPendingMessages() || event.context.pendingMessages.length)) return;
+		const message = syncMessage(ctx);
+		if (message) return {entries: [...event.entries, {type: "custom_message" as const, ...message}]};
+	});
+	pi.on("turn_start", (_event, ctx) => {
+    cancelIdleReview();
+    const lab = labRoot(ctx.cwd);
+    if (lab) questions.acknowledge(lab, ctx.sessionManager.getBranch()
+      .filter(e => e.type === "custom_message" && e.customType === "pe-answer")
+      .map(e => (e as any).details?.delivery));
+    if (!busy) { busy = true; refresh(); }
+  });
 	pi.on("model_select", cancelReaction);
 	pi.on("thinking_level_select", cancelReaction);
 
+	pi.registerTool({
+		name: "pe_question", label: "Operator questions", defaultActive: false,
+		description: "Leave a nonblocking question for the operator, or list questions. Continue independent research. Pending questions never grant permission.",
+		parameters: Type.Object({
+			question: Type.Optional(Type.String()),
+			affected: Type.Optional(Type.String()),
+			proposedDefault: Type.Optional(Type.String()),
+		}),
+		async execute(_id, args, _signal, _update, ctx) {
+			const lab = requireLab(ctx);
+			return result(JSON.stringify(args.question ? questions.submit(lab, args) : questions.list(lab), null, 2));
+		},
+	});
+	pi.registerCommand("pe-questions", {
+		description: "List operator questions, or answer: /pe-questions Q-id answer",
+		handler: async (args, ctx) => {
+			const lab = requireLab(ctx), [id, ...words] = args.trim().split(/\s+/);
+			if (id) questions.answer(lab, id, words.join(" "));
+			ctx.ui.notify(JSON.stringify(questions.list(lab), null, 2), "info");
+			refresh();
+		},
+	});
+	pi.registerCommand("pe-report", {
+		description: "Show the combined lab report",
+		handler: async (_args, ctx) => { ctx.ui.notify(record.refresh(requireLab(ctx)).text, "info"); },
+	});
+	pi.registerCommand("pe-usage", {
+		description: "Show activity, timing, and usage; optionally select a lab name",
+		handler: async (args, ctx) => {
+			const lab = requireLab(ctx);
+			await scheduleReport(lab, true);
+			const data = reportData(lab), name = args.trim();
+			const selected = name && name !== "all" ? data.collective.labs.find(l => l.label === name) : null;
+			if (name && name !== "all" && !selected) throw new Error(`Unknown lab: ${name}`);
+			ctx.ui.notify(activityMarkdown(activityView(data, selected?.id || "all"), {overall: !selected}) +
+				"\nCharts and shared report: .research/activity/README.md", "info");
+		},
+	});
+	pi.on("before_agent_start", (_event, ctx) => {
+		const lab = labRoot(ctx.cwd);
+		if (!lab) return;
+		const delivered = ctx.sessionManager.getBranch()
+			.filter(e => e.type === "custom_message" && e.customType === "pe-answer")
+			.map(e => (e as any).details?.delivery);
+		for (const q of questions.pending(lab, delivered)) {
+			pi.sendMessage({
+				customType: "pe-answer", display: true,
+				content: `Operator answer to ${q.id}: ${q.question}\n${q.answer}`,
+				details: {delivery: q.delivery},
+			}, {deliverAs: "nextTurn"});
+		}
+	});
 	pi.registerCommand("pe-version", {
 		description: "Check PE runtime hashes, local edits, upstream updates, and whether a reload is needed",
 		handler: async (_args, ctx) => { await inspectPlugin(ctx, true); },
@@ -1430,7 +1547,7 @@ who writes the shared record.`;
 				pi.sendUserMessage(request || "Continue the lab: read STATUS and QUEUE, then take the next useful task.", deliver);
 				return;
 			}
-			const kickoff = skills().find((s) => s.name === "pe-kickoff")!;
+			const kickoff = skills(ctx.cwd).find((s) => s.name === "pe-kickoff")!;
 			const body = readFileSync(kickoff.filePath, "utf8").replace(/^---\n[\s\S]*?\n---\n/, "").trim();
 			const block = `<skill name="pe-kickoff" location="${kickoff.filePath}">\nReferences are relative to ${kickoff.baseDir}.\n\n${body}\n</skill>`;
 			pi.sendUserMessage(`${block}\n\n${request || "Set up this directory as a lab."}`, deliver);

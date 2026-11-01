@@ -8,7 +8,7 @@ import {spawn, execFileSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
-const source = readFileSync(join(repo, 'dsh-client.js'), 'utf8');
+const source = readFileSync(join(repo, 'src/dsh-client.bundle.js'), 'utf8');
 
 // Load the bundle as DSH's module loader would, with a React that renders to plain objects.
 let loaded;
@@ -16,9 +16,11 @@ globalThis.window = {__ModuleLoader__: {load: entry => { loaded = entry; }}};
 globalThis.matchMedia = () => ({matches: false});
 new Function(source)();
 assert.equal(loaded.id, 'persistent-eclipse');
+let stateIndex=0,stateValues=[];
 const react = {
   createElement: (type, props, ...children) => ({type, props: props ?? {}, children: children.flat()}),
-  useState: initial => [initial, () => {}], useEffect: () => {},
+  useState: initial => [stateValues[stateIndex++] ?? initial, () => {}], useEffect: () => {},
+  useRef: value => ({current: value}),
 };
 const plugin = loaded.factory(name => { if (name === 'react') return react; throw new Error('unexpected import ' + name); });
 const registered = [];
@@ -31,13 +33,13 @@ console.log('ok   client: registers one pill under the composer, fed by DSH\'s s
 const text = node => typeof node === 'string' ? node : node ? node.children.map(text).join('') : '';
 const svgs = node => !node || typeof node === 'string' ? 0 : (node.type?.name === 'Dots' ? 1 : 0) + node.children.reduce((n, c) => n + svgs(c), 0);
 const now = Date.now();
-const render = ({preset = 'persistent-eclipse', limit = 6, running = ['w1', 'w2'], catalog = ['w1', 'w2', 'w3']} = {}) => Fleet({
+const render = ({preset = 'persistent-eclipse', limit = 6, running = ['w1', 'w2'], catalog = ['w1', 'w2', 'w3'], goal, lab, open=false, report, usage} = {}) => {stateIndex=0;stateValues=[open,usage,'all',{},'',Date.now(),lab,report];return Fleet({
   sessionId: 'manager',
-  useProjection: key => key === 'agentPreset' ? preset : catalog.map((id, i) => ({id, label: 'T-' + i, createdAt: now - (i + 1) * 60_000})),
+  useProjection: key => key === 'agentPreset' ? preset : key === 'goal' ? {goal} : catalog.map((id, i) => ({id, label: 'T-' + i, createdAt: now - (i + 1) * 60_000})),
   useSessionStatus: select => select(new Map(running.map(id => [id, {running: true}]))),
   useSessions: select => select({byId: {}}),
   useSubagentLimits: select => select({value: limit === null ? undefined : {maxActiveSubagents: limit}}),
-});
+});};
 const pill = render();
 assert.ok(text(pill).startsWith('Persistent Eclipse') && text(pill).endsWith('+1'), text(pill));
 assert.equal(svgs(pill), 6);
@@ -47,6 +49,43 @@ assert.equal(svgs(render({limit: null})), 8);
 assert.equal(svgs(render({limit: 1, running: ['w1', 'w2', 'w3']})), 3);
 assert.equal(render({preset: 'standard'}), null);
 console.log('ok   client: one cell per DSH subagent slot (default 8, never fewer than running), completions, PE sessions only');
+
+for(const phase of ['active','paused','blocked','complete'])assert.ok(text(render({goal:{phase},lab:{goalActivation:'armed'}})).includes('⚑ '+phase));
+assert.ok(text(render({goal:{phase:'active'},lab:{goalActivation:'disarmed'}})).includes('awaiting resume'));
+assert.ok(text(render({lab:{questions:[{status:'open'},{status:'answered'}]}})).includes('? 1'));
+console.log('ok   client: goal states and unanswered question counts remain readable without color');
+
+const sharing = text(render({open:true, lab:{sync:{state:'waiting', behind:3, advice:['Evidence remains in scratch.']}}}));
+assert.match(sharing, /3 shared commit\(s\) ready/);
+assert.match(sharing, /Advice: Evidence remains in scratch/);
+assert.ok(!sharing.includes('needs-review'));
+console.log('ok   client: incoming work and citation advice stay distinct from blocked publication');
+const viewsOnly = text(render({open:true, lab:{sync:{state:'synced',automatic:true,viewsPending:true},
+  remote:{name:'origin',branch:'main',behind:4},provenance:['Using compatible math content at pinned revision.']}}));
+assert.match(viewsOnly, /Sync: automatic/);
+assert.match(viewsOnly, /Using compatible math content/);
+assert.ok(!viewsOnly.includes('to pull') && !viewsOnly.includes('shared commit(s) ready'));
+
+const reportText = node => !node || typeof node !== 'object' ? []
+  : [...(node.type === 'pre' ? node.children : []), ...node.children.flatMap(reportText)];
+assert.deepEqual(reportText(render({open:true,report:{sessionId:'manager',text:'A new avenue'}})),['A new avenue']);
+assert.deepEqual(reportText(render({open:true,report:{sessionId:'other-lab',text:'Old lab report'}})),[]);
+console.log('ok   client: the report expands in its own lab and never carries across a session switch');
+
+const find = (node, predicate) => !node || typeof node !== 'object' ? null
+  : predicate(node) ? node : node.children.map(c => find(c, predicate)).find(Boolean);
+const {activityView, activityChart} = await import('./history.mjs');
+const view = activityView({usage: {receipts: [], turns: []}, collective: {labs: []}});
+const usage = {sessionId: 'manager', value: {view, chart: activityChart(view)}};
+const activity = find(render({open: true, usage}), n => n.type?.name === 'Activity');
+assert.ok(activity);
+stateIndex = 0; stateValues = ['Conversations'];
+const card = activity.type(activity.props);
+assert.ok(find(card, n => n.type === 'img').props.src.startsWith('data:image/svg+xml'));
+assert.ok(find(card, n => n.type === 'select').props['aria-label'] === 'Activity lab');
+assert.ok(text(card).includes('unknown end'));
+assert.equal(find(render({open: true, usage: {...usage, sessionId: 'another-lab'}}), n => n.type?.name === 'Activity'), undefined);
+console.log('ok   client: activity exposes charts, lab selection, and conversation detail only for the selected session');
 
 const bin = process.argv[2];
 if (bin) {

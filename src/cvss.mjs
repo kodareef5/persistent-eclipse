@@ -1,7 +1,7 @@
 // Usage: node cvss.mjs '<vector>' ...
 // node cvss.mjs --sha prints the sha256 of this file, to check a copy is exact.
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const V31 = {
@@ -151,7 +151,11 @@ function report(r) {
   return lines.join('\n')
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isCommand() {
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href }
+  catch { return false }
+}
+if (isCommand()) {
   const vectors = process.argv.slice(2)
   if (vectors[0] === '--sha') {
     console.log(createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url), 'utf8').trimEnd() + '\n').digest('hex'))

@@ -100,3 +100,6 @@ to award without evidence. One reaction need not include encouragement at all:
 34. A useful detour should teach us something about the original obstacle. Follow that connection.
 35. You can pause the routine and think. A clear argument is useful lab work.
 36. If the evidence closes this route, carry what you learned into a different question.
+
+Choose a thought that fits the work in front of you. Help the manager see a useful
+opening, then leave room for it to think.

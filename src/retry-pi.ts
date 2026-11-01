@@ -13,6 +13,7 @@ export function installRetry(pi: ExtensionAPI, enabled: (ctx: ExtensionContext) 
     ready = false;
     if (!enabled(ctx) || event.message.stopReason !== "error") { reset(ctx); return; }
     // Leave context repair to Pi. This hook retries requests, never tools.
+    if (/cache_control|maximum of .* blocks|invalid_request_error/i.test(event.message.errorMessage || "")) return;
     if (isContextOverflow(event.message, ctx.model?.contextWindow) || !ctx.signal || ctx.signal.aborted) return;
     const delayMs = retryDelay(++attempt);
     const status = `${ctx.model?.provider ?? "provider"}: retry at ${new Date(Date.now() + delayMs).toLocaleTimeString()}`;

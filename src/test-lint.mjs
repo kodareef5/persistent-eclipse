@@ -443,7 +443,7 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x')
     return root
   }
-  const push = root => spawnSync(process.execPath, [lint, '--push'], { cwd: root, encoding: 'utf8' })
+  const push = root => spawnSync(process.execPath, [lint, '--push', '--advice'], { cwd: root, encoding: 'utf8' })
   const target = { targets: '[runs/REQ-1/out.txt]' }
   {
     const root = committed({ 'R-1.md': note('R-1', target) }, { '.research/runs/REQ-1/out.txt': 'fine\n' })
@@ -454,7 +454,7 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     const key = 'sk-or-v1-' + 'a'.repeat(40)
     const root = committed({ 'R-1.md': note('R-1', target) }, { '.research/runs/REQ-1/out.txt': `key=${key}\n` })
     const r = push(root)
-    r.status === 1 && /\.research\/runs\/REQ-1\/out\.txt:1: looks like a credential/.test(r.stdout) ? ok('push: a credential fails') : fail('push: a credential fails', r.stdout)
+    r.status === 1 && /\.research\/runs\/REQ-1\/out\.txt: looks like a credential/.test(r.stdout) ? ok('push: a credential fails') : fail('push: a credential fails', r.stdout)
   }
   {
     const big = Buffer.alloc(6 * 2 ** 20, 'a')
@@ -462,6 +462,8 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     const r = push(root)
     r.status === 1 && /big\.bin: 6\.0 MiB; reference it/.test(r.stdout) ? ok('push: a large file fails') : fail('push: a large file fails', r.stdout)
     writeFileSync(join(root, '.research', 'LARGE.md'), '- `.research/runs/REQ-1/big.bin`: the solver input, too costly to rebuild\n')
+    git(root, 'add', '.research/LARGE.md')
+    git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'Explain retained artifact')
     const r2 = push(root)
     r2.status === 0 ? ok('push: LARGE.md allows a listed file') : fail('push: LARGE.md allows a listed file', r2.stdout)
   }
@@ -470,14 +472,14 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     mkdirSync(join(root, '.research', 'runs', 'REQ-1'), { recursive: true })
     writeFileSync(join(root, '.research', 'runs', 'REQ-1', 'out.txt'), 'later\n')
     const r = push(root)
-    r.status === 1 && /target "runs\/REQ-1\/out\.txt" is not committed/.test(r.stdout) ? ok('push: an uncommitted target fails') : fail('push: an uncommitted target fails', r.stdout)
+    r.status === 0 && /target "runs\/REQ-1\/out\.txt" is not committed/.test(r.stdout) ? ok('push: an uncommitted target is advice') : fail('push: an uncommitted target is advice', r.stdout)
   }
 }
 
 {
   const git = (root, ...a) => spawnSync('git', a, { cwd: root, encoding: 'utf8' })
   const commit = (root, message) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', message) }
-  const push = root => spawnSync(process.execPath, [lint, '--push'], { cwd: root, encoding: 'utf8' })
+  const push = root => spawnSync(process.execPath, [lint, '--push', '--advice'], { cwd: root, encoding: 'utf8' })
   // A credential committed and then deleted still travels in history.
   {
     const root = labRoot({ 'R-1.md': note('R-1') })
@@ -487,7 +489,7 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     rmSync(join(root, '.research', 'key.txt'))
     commit(root, 'remove it')
     const r = push(root)
-    r.status === 1 && /key\.txt \(in an outgoing commit, no longer at HEAD\):1: looks like a credential/.test(r.stdout)
+    r.status === 1 && /key\.txt \(in an outgoing commit, no longer at HEAD\): looks like a credential/.test(r.stdout)
       ? ok('push: a credential in an earlier outgoing commit fails') : fail('push: a credential in an earlier outgoing commit fails', r.stdout)
   }
   // Vendor evidence must arrive with the push too.
@@ -498,8 +500,8 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
     mkdirSync(join(root, '.research', 'vendor', 'srvx@1.0.8'), { recursive: true })
     writeFileSync(join(root, '.research', 'vendor', 'srvx@1.0.8', 'index.mjs'), 'x\n')
     const r = push(root)
-    r.status === 1 && /target "vendor\/srvx@1\.0\.8\/index\.mjs" is not committed/.test(r.stdout)
-      ? ok('push: uncommitted vendor evidence fails') : fail('push: uncommitted vendor evidence fails', r.stdout)
+    r.status === 0 && /target "vendor\/srvx@1\.0\.8\/index\.mjs" is not committed/.test(r.stdout)
+      ? ok('push: uncommitted vendor evidence is advice') : fail('push: uncommitted vendor evidence is advice', r.stdout)
   }
   // The lab remote decides, not Git's default destination.
   {
@@ -531,7 +533,22 @@ expectClean('imported: a qualified id from another lab', lab({ 'R-1.md': note('R
 // One credential list: the linter's push check and the packer warn on the same patterns.
 {
   const list = file => /const SECRETS = (\[[\s\S]*?\]);/.exec(readFileSync(join(here, file), 'utf8'))?.[1]
-  list('lint-notes.mjs') && list('lint-notes.mjs') === list('pack.mjs') ? ok('push: SECRETS matches pack.mjs') : fail('push: SECRETS matches pack.mjs', 'the two lists differ')
+  list('push-check.mjs') && list('push-check.mjs').replace(/\s+/g,'') === list('pack.mjs').replace(/\s+/g,'') ? ok('push: SECRETS matches pack.mjs') : fail('push: SECRETS matches pack.mjs', 'the two lists differ')
+}
+
+// Peer schema debt is visible without burying this lab's findings. Summarizing
+// never exempts it from checks or changes the exit status.
+{
+  const root = labRoot({'R-maple-1.md': note('R-maple-1', {state: 'wrong'}),
+    'R-cedar-1.md': note('R-cedar-1', {state: 'wrong'})})
+  spawnSync('git', ['init', '-q'], {cwd: root})
+  spawnSync('git', ['config', 'pe.lab', 'maple'], {cwd: root})
+  const short = run('--dir', join(root, '.research/notes'))
+  const full = run('--dir', join(root, '.research/notes'), '--peers')
+  short.code === 1 && full.code === 1 && short.out.includes('R-maple-1:') &&
+    !short.out.includes('R-cedar-1:') && short.out.includes('Peer problems: cedar=') && full.out.includes('R-cedar-1:')
+    ? ok('peer findings: summarize separately without hiding their counts or changing failure status')
+    : fail('peer findings: summary and expansion', short.out + full.out)
 }
 
 // --sha must describe the file the lab will write.
@@ -543,7 +560,7 @@ sha.status === 0 && sha.stdout.trim() === want
   : fail('--sha matches the source that would be written', sha.stdout)
 
 // The skill must hash the lab copy externally, never by running it.
-const skillText = readFileSync(join(here, 'skills', 'lint.md'), 'utf8')
+const skillText = readFileSync(join(here, '../packs/common/skills/lint.md'), 'utf8')
 !/node \.research\/tools\/lint-notes\.mjs --sha/.test(skillText)
   ? ok('the skill hashes the copy instead of running it')
   : fail('the skill hashes the copy instead of running it', 'skill tells the lab to run the linter for its own hash')

@@ -4,19 +4,21 @@
 // preset (a Standard worker). It then edits, removes, and restores the patch
 // while Harness runs and checks the worker sees each change with no duplicates.
 // Usage: node src/test-dsh.mjs /path/to/dsh/apps/cli/lib/bin.js
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { cpSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { reportData } from './history.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
+import contentRuntime from './content.cjs'
 import { fileURLToPath } from 'node:url'
 
 const bin = process.argv[2]
 if (!bin) { console.error('usage: node src/test-dsh.mjs <dsh bin.js>'); process.exit(2) }
 const patch = join(dirname(fileURLToPath(import.meta.url)), '..', 'cordis.patch.yml')
 const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode,
-  readFileSync(join(dirname(patch), 'src', 'missions', mode + '.md'), 'utf8')]))
+  readFileSync(join(dirname(patch), 'packs', ({'red-team':'red','blue-team':'blue','math-team':'math',signals:'signals'})[mode], 'mission.md'), 'utf8')]))
 const home = mkdtempSync(join(tmpdir(), 'pe-boot-'))
+const contentRoot=join(home,'packs');cpSync(join(dirname(patch),'packs'),contentRoot,{recursive:true})
 const lab = mkdtempSync(join(tmpdir(), 'pe-lab-'))
 const notLab = mkdtempSync(join(tmpdir(), 'pe-notlab-'))
 // A directory that starts without a lab, so the probe can create one mid-session.
@@ -28,6 +30,11 @@ const drift = mkdtempSync(join(tmpdir(), 'pe-drift-'))
 mkdirSync(join(drift, '.research', 'tools'), { recursive: true })
 writeFileSync(join(drift, '.research', 'LAB.md'), '# lab\n')
 writeFileSync(join(drift, '.research', 'tools', 'lint-notes.mjs'), '// edited by hand\n')
+try {
+  const old = execFileSync('git', ['show', '71afe0189510f8d7dcdc585ff42b769a62b0bcba:src/history.mjs'], {cwd: dirname(patch), stdio: ['ignore', 'pipe', 'pipe']})
+  writeFileSync(join(drift, '.research/tools/history.mjs'), old)
+} catch { /* Source-only archives have no historical Git fixture. */ }
+
 const missionLab = mkdtempSync(join(tmpdir(), 'pe-mission-'))
 const missionNested = join(missionLab, 'sources', 'example')
 mkdirSync(missionNested, {recursive: true}); mkdirSync(join(missionLab, '.research'))
@@ -35,6 +42,18 @@ writeFileSync(join(missionLab, '.research', 'LAB.md'), '# mission lab\n')
 const missionFile = join(missionLab, '.research', 'MISSION.md')
 let customMission = missions['math-team'] + '\n## Operator directions\nKeep $& and {{literal}} intact.\n'
 writeFileSync(missionFile, customMission)
+const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+const remote = join(home, 'remote.git'); mkdirSync(remote);
+git(remote, 'init', '--bare', '-b', 'main');
+git(missionLab, 'init', '-b', 'main');
+git(missionLab, 'config', 'user.name', 'Fixture'); git(missionLab, 'config', 'user.email', 'fixture@example.invalid');
+writeFileSync(join(missionLab, '.research/LAB.md'), '# Mission lab\nSync: origin main\n');
+git(missionLab, 'add', '.research/LAB.md', '.research/MISSION.md'); git(missionLab, 'commit', '-m', 'Lab');
+git(missionLab, 'remote', 'add', 'origin', remote); git(missionLab, 'push', '-u', 'origin', 'main');
+git(missionLab, 'config', 'pe.syncApprovedUrl', remote);
+writeFileSync(join(missionLab, '.research/FEEDBACK.md'), 'A committed DSH contribution.\n');
+git(missionLab, 'add', '.research/FEEDBACK.md'); git(missionLab, 'commit', '-m', 'Contribute research');
+const liveHead = git(missionLab, 'rev-parse', 'HEAD');
 
 // One plugin row that, every second, lists the catalog from its own scope in a lab
 // and outside one, loads the pe-reader body, and writes the result to `out`. On its
@@ -69,7 +88,7 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                       const inLab = await names(${JSON.stringify(lab)})
                       const outside = await names(${JSON.stringify(notLab)})
                       const body = (await reg.get('pe-reader', { cwd: ${JSON.stringify(lab)}, scope }))?.content ?? ''
-                      const math = await reg.get('pe-math', { cwd: ${JSON.stringify(lab)}, scope })
+                      const math = await reg.get('pe-math', { cwd: ${JSON.stringify(missionLab)}, scope })
                       const base = math?.resourceBase?.kind === 'directory' ? math.resourceBase.path : null
                       const lean = base && fs.existsSync(base + '/notes/tools.lean.md') ? fs.readFileSync(base + '/notes/tools.lean.md', 'utf8') : null
                       coldResult ??= await coldStart()
@@ -85,13 +104,15 @@ const probe = (id, out, inspectMission = false) => `          - id: ${id}
                         const initial = (await prompt.assemble({scope})).variables.pe_mission
                         if (!missionSession) {
                           missionSession = ctx.get('sessions').create(undefined, {meta: {cwd: ${JSON.stringify(missionNested)}}})
+                          missionSession.append('turn/start', {turn: 1})
                           missionSession.append('request/context', {provider: 'fixture', model: 'history-probe'})
                           missionSession.append('request/header', {reason: 'initial', header: {config: {provider: 'fixture', model: 'history-probe', reasoningEffort: 'high'}}})
                           missionSession.append('assistant/attempt', {turn: 1, step: 1, stream: []})
                           missionSession.append('assistant/attempt', {turn: 1, step: 1, stream: [{type: 'chunk', time: Date.now(), chunk: {type: 'usage', usage: {inputTokens: 12, outputTokens: 3, cacheReadTokens: 4}}}]})
+                          missionSession.append('turn/end', {turn: 1, reason: {kind: 'complete'}})
                         }
-                        const persisted = (await prompt.assemble({scope, agent: {id: missionSession.id, session: missionSession, ctx, options: {}}})).variables.pe_mission
-                        mission = {initial, persisted}
+                        const variables = (await prompt.assemble({scope, agent: {id: missionSession.id, session: missionSession, ctx, options: {}}})).variables
+                        mission = {initial, persisted: variables.pe_mission, persona: variables.pe_persona}
                       }
                       const kickoff = (await reg.get('pe-kickoff', { cwd: ${JSON.stringify(notLab)}, scope }))?.content ?? null
                       fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ inLab, outside, cold: coldResult, mission, kickoff, heading: body.match(/^# .*/m)?.[0] ?? null, lean, mathNotes: math?.content?.includes('notes/tools.lean.md') ?? false }))
@@ -164,13 +185,11 @@ const homePatch = join(home, 'cordis.patch.yml')
 writeFileSync(homePatch, text)
 
 const child = spawn('node', [bin, '--profile', 'web', '--no-open', '--port', '0', '--host', '127.0.0.1'],
-  { env: { ...process.env, DSH_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'] })
+  { env: { ...process.env, DSH_HOME: home, PE_PACK_ROOT:contentRoot, PE_PACK_CACHE:join(home,'cache') }, stdio: ['ignore', 'ignore', 'pipe'] })
 let stderr = ''
 child.stderr.on('data', d => { stderr += d })
 
-const want = ['pe-challenger', 'pe-dead-end', 'pe-fleet', 'pe-git-research', 'pe-intel',
-  'pe-cvss', 'pe-lint', 'pe-migrator', 'pe-muse', 'pe-coderunner', 'pe-reader',
-  'pe-reporter', 'pe-status-report', 'pe-survey', 'pe-patch', 'pe-math', 'pe-web', 'pe-export', 'pe-sync', 'pe-layered-challenge', 'pe-history', 'pe-models', 'pe-model-notes', 'pe-hunt', 'pe-osint', 'pe-forecast', 'pe-judge'].sort()
+const want = [...new Set(['common','blue'].flatMap(g=>Object.keys(JSON.parse(readFileSync(join(contentRoot,g,'pack.json'),'utf8')).skills)))].filter(n=>n!=='pe-kickoff').sort()
 const read = file => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null } }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -215,11 +234,26 @@ try {
     const mission = read(manager)?.mission
     return mission?.initial === missions['blue-team'] && mission.persisted === customMission
   })
+  await until('guidance: an existing DSH lab receives the unreviewed notice', () => read(manager)?.mission?.persona?.includes('has no acknowledged review in this clone'))
+  contentRuntime.conventionStatus(missionLab, contentRuntime.resolveContent(missionLab, {localRoot: contentRoot}), {acknowledge: true})
+  await until('guidance: acknowledgement reaches the next DSH assembly', () => read(manager)?.mission?.persona?.includes('No opening review announcement is needed.'))
+  await until('sync: the embedded DSH runtime rebuilds and publishes committed inputs', () => {
+    try { return git(remote, 'show', 'main:.research/REPORT.md').includes('# Research report') }
+    catch { return false }
+  })
+  if (git(missionLab, 'rev-parse', 'HEAD') !== liveHead) throw new Error('Background DSH sharing moved the live checkout');
+  await until('sync: DSH treats its own generated views as synced', () =>
+    JSON.parse(readFileSync(join(missionLab, '.research/local/sync.json'), 'utf8')).state === 'synced');
+  if (read(manager)?.mission?.persona?.includes('Shared research is ready')) throw new Error('Sync status leaked into the system prompt');
+  const persona = read(manager).mission.persona;
+  execFileSync(process.execPath, [join(missionLab, '.research/tools/sync.mjs')], {cwd: missionLab, stdio: 'pipe'});
+  await until('sync: manager adoption preserves the DSH system prefix', () => read(manager)?.mission?.persona === persona);
   await until('history: host observer retains a real DSH session and an unmetered attempt', () => {
     const data = reportData(missionLab)
     return data.usage.sessions.length === 1 && data.usage.calls === 2 && data.usage.unmetered === 1
       && data.usage.rows[0]?.effort === 'high' && data.usage.rows[0]?.sums.input === 12
       && data.collective.labs.some(row => row.local && row.calls === 2)
+      && data.usage.turns.some(t => t.ended >= t.started)
   })
   await until('history: a standard worker is captured by the host without a PE manager plugin', () => {
     const data = reportData(lab)
@@ -228,17 +262,28 @@ try {
   customMission += 'The operator updated the mission during the session.\n'
   writeFileSync(missionFile, customMission)
   await until('mission edits reach the next assembly', () => read(manager)?.mission?.persisted === customMission)
-  await until('kickoff carries all three mission texts verbatim', () => {
+  const selectionFile=join(missionLab,'.research/packs.json');
+  writeFileSync(selectionFile,JSON.stringify({mission:'signals'}));
+  await until('mission: DSH surfaces a mission/catalog disagreement without rewriting the mission', () =>
+    read(manager)?.mission?.persona.includes('MISSION.md selects math, but packs.json selects signals') && readFileSync(missionFile,'utf8')===customMission);
+  rmSync(selectionFile);
+  await until('mission: restoring selection removes the disagreement', () =>
+    read(manager)?.mission?.persona && !read(manager).mission.persona.includes('but packs.json selects'));
+  const cliMission=execFileSync(process.execPath,[join(missionLab,'.research/tools/content.cjs'),'mission'],
+    {cwd:missionLab,env:{...process.env,PE_PACK_ROOT:'',PE_PACK_CACHE:''},encoding:'utf8'});
+  if(cliMission.trim()!==missions['math-team'].trim())throw new Error('DSH copied CLI did not inherit the manager content source');
+  console.log('ok   content: copied DSH CLI uses the manager source without inherited environment');
+  await until('kickoff points to the selected pack without embedding other missions', () => {
     const body = read(manager)?.kickoff ?? ''
-    return body.includes('## The mission') && Object.values(missions).every(m => body.includes(m))
+    return body.includes('## The mission') && body.includes('content.cjs mission') && !Object.values(missions).some(m => body.includes(m))
   })
   await until('notes: a skill names its field notes, and they sit in its resource folder byte for byte', () => {
     const r = read(manager)
-    return r?.mathNotes && r.lean === readFileSync(join(dirname(patch), 'src', 'skills', 'math', 'tools.lean.md'), 'utf8').trimEnd() + '\n'
+    return r?.mathNotes && r.lean === readFileSync(join(dirname(patch), 'packs', 'math', 'skills', 'math', 'tools.lean.md'), 'utf8').trimEnd() + '\n'
   })
   await until('tools: the lab gets the linter, calculator, and packer, byte for byte', toolsPlaced)
-  // A lab keeps the copy its record was built with. The runtime may never replace it, and
-  // must leave what it would have written beside it so the difference can be read.
+  // Customized helpers stay in place. Untouched known shipments upgrade together.
+  await until('tools: old untouched history upgrades alongside the new sync helper', () => placed(drift, 'history.mjs') && placed(drift, 'sync.mjs'))
   await until('tools: a lab\'s own copy is kept, with the shipped bytes beside it', () => {
     const file = join(drift, '.research', 'tools', 'lint-notes.mjs')
     return readFileSync(file, 'utf8') === '// edited by hand\n' && existsSync(`${file}.shipped`)
@@ -246,13 +291,15 @@ try {
   })
   await until('tools: nothing is placed outside a lab', toolsKept)
 
-  writeFileSync(homePatch, text.replace('\n              # Reader\n', '\n              # Reader (edited)\n'))
+  const readerFile=join(contentRoot,'blue/skills/reader.md'), originalReader=readFileSync(readerFile,'utf8')
+  writeFileSync(readerFile,originalReader.replace('# Reader\n','# Reader (edited)\n'))
   await until('edit: worker sees the new body', () => library('# Reader (edited)', read(worker)))
 
   const start = text.indexOf('    - id: pe-skills'), end = text.indexOf('    - id: preset-persistent-eclipse')
   writeFileSync(homePatch, text.slice(0, start) + text.slice(end))
   await until('remove: the library disappears', () => same(read(worker)?.inLab, []))
 
+  writeFileSync(readerFile,originalReader)
   writeFileSync(homePatch, text)
   await until('restore: the full set again, no duplicates', () => library('# Reader', read(worker)))
 

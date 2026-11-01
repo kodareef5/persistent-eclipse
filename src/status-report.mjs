@@ -1,6 +1,7 @@
 // Usage: node .research/tools/status-report.mjs stats [--lab LAB] [--json]
 //        node .research/tools/status-report.mjs check [--json]
-// stats prints the Numbers block for this lab's next status report: everything since its
+// Historical replay only. Use history.mjs report for current accounting.
+// stats reproduces the legacy Numbers block: everything since its
 // last one. Notes and inbox use one committed Git snapshot; receipts and disk are live. A number
 // no record supports is left out or marked unknown, never estimated. Receipts carry no
 // time, so the block carries a hidden `<!-- totals: ... -->` line and the next report
@@ -20,6 +21,7 @@ if (argv.includes("--sha")) {
 }
 const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const command = argv[0], asJson = argv.includes("--json");
+console.error("Historical report helper: these legacy totals mix cost bases and may treat missing peers as zero. Use history.mjs report for current accounting; do not compare its totals by subtraction.");
 if (command !== "stats" && command !== "check") {
   console.error("usage: node status-report.mjs stats [--lab LAB] [--json] | check [--json]");
   process.exit(2);

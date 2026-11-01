@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "id": "math",
+  "dependencies": [
+    "common"
+  ],
+  "skills": {
+    "pe-math": "skills/math.md",
+    "pe-muse": "skills/muse.md"
+  },
+  "resources": [
+    "mission.md",
+    "skills/math/challenge.attacks.md",
+    "skills/math/challenge.layers.md",
+    "skills/math/challenge.repairs.md",
+    "skills/math/establish.checks.md",
+    "skills/math/establish.evidence.md",
+    "skills/math/establish.layers.md",
+    "skills/math/explore.layers.md",
+    "skills/math/explore.moves.md",
+    "skills/math/explore.regimes.md",
+    "skills/math/tools.compute.md",
+    "skills/math/tools.lean.md",
+    "skills/math/tools.software.md",
+    "skills/math.md",
+    "skills/muse/connections.md",
+    "skills/muse.md",
+    "skills/muse/experiments.md",
+    "skills/muse/assumptions.md",
+    "skills/muse/representations.md",
+    "skills/muse/counterexamples.md",
+    "skills/muse/probability.md"
+  ],
+  "mission": "mission.md"
+}

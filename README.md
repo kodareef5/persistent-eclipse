@@ -25,14 +25,15 @@ dsh plugin --profile web add github:kodareef5/persistent-eclipse
 ### Source map
 
 ```text
-src/missions/ ──┐
-src/skills/  ───┼─ build.py → cordis.patch.yml
-src/research.md ┘                  │
-                              Pi or DSH
+├── src/
+│   └── build.py
+├── cordis.patch.yml   ← built for DeepSeek Harness
+├── extension.ts       ← Pi
+└── package.json
 ```
 
 Persistent Eclipse intentionally runs without its own sandbox.  
 Use a dedicated, isolated environment.  
 Monitor execution and resources. 
 
-[Build details](src/README.md) · [Remote operation](REMOTE-OPERATOR-COMMS.md)
+[Build details](src/README.md) · [Remote operation](src/REMOTE-OPERATOR-COMMS.md)

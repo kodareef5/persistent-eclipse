@@ -1,8 +1,8 @@
 {
   "name": "persistent-eclipse",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
-  "description": "A persistent Git-native research lab for DeepSeek Harness and Pi: Red Team, Blue Team, Math Team, and session goals.",
+  "description": "A persistent Git-native research lab for DeepSeek Harness and Pi: Red Team, Blue Team, Math Team, Signals, and session goals.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -16,7 +16,7 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
-        "./dsh-ui.patch.yml"
+        "./src/dsh-ui.patch.yml"
       ]
     },
     "client": {
@@ -35,8 +35,27 @@
     "@earendil-works/pi-coding-agent": ">=1.4.0"
   },
   "exports": {
-    ".": "./dsh-host.js",
-    "./client": "./dsh-client.js",
+    ".": "./src/dsh-host.js",
+    "./client": "./src/dsh-client.bundle.js",
     "./package.json": "./package.json"
+  },
+  "files": [
+    "extension.ts",
+    "cordis.patch.yml",
+    "src/*.mjs",
+    "src/*.cjs",
+    "src/pack-defaults.json",
+    "src/*.ts",
+    "src/dsh-host.js",
+    "src/dsh-client.bundle.js",
+    "src/dsh-ui.patch.yml",
+    "src/idle-review.md",
+    "!src/test-*",
+    "!src/preview-*",
+    "!src/setup-test-lab.mjs"
+  ],
+  "scripts": {
+    "build": "python3 src/build.py",
+    "test": "node --test src/test-activity.mjs src/test-cells.mjs src/test-content.mjs src/test-cvss.mjs src/test-dsh-client.mjs src/test-history.mjs src/test-install.mjs src/test-integrity.mjs src/test-lab-status.mjs src/test-lint.mjs src/test-pack.mjs src/test-record.mjs src/test-retry.mjs src/test-runtime.mjs src/test-signals.mjs src/test-status-report.mjs src/test-sync.mjs src/test-tools.mjs"
   }
 }

@@ -93,7 +93,7 @@ ${script.split('\n').map(line => '              ' + line).join('\n')}
           })()
 `);
 const child = spawn('node', [bin, '--profile', 'web', '--no-open', '--port', '0', '--host', '127.0.0.1'],
-  {env: {...process.env, DSH_HOME: root}, stdio: ['ignore', 'ignore', 'pipe']});
+  {env: {...process.env, DSH_HOME: root, PE_PACK_ROOT: join(dirname(fileURLToPath(import.meta.url)), '../packs')}, stdio: ['ignore', 'ignore', 'pipe']});
 let stderr = '';
 child.stderr.on('data', data => { stderr += data; });
 try {

@@ -27,11 +27,13 @@ put(".research/labs/gpu/QUEUE.md", "");
 put(".research/notes/R-mac-1.md", note("R-mac-1", "open"));
 put(".research/notes/R-gpu-1.md", note("R-gpu-1", "supported"));
 cpSync(join(src, "history.mjs"), join(lab, ".research/tools/history.mjs"));
+cpSync(join(src, "activity.mjs"), join(lab, ".research/tools/activity.mjs"));
 git("add", "-A");
 commit("start");
 
 test("a first report has totals only, and a hidden totals line for the next one", () => {
   const r = tool("stats");
+  assert.match(r.stderr, /Historical report helper/);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^<!-- totals: calls=0 sessions=0 workers=0 total=0 output=0 reasoning=0 cost=0\.00 -->$/m);
   assert.match(r.stdout, /mac's first status report, so the Since column is empty/);

@@ -1,13 +1,7 @@
-// DSH holds goal rounds until a manager's workers settle, so a stuck worker leaves the
-// manager waiting in silence. During an armed goal, as in Pi: a manager idle for fifteen
-// minutes with workers running gets a fleet check when two slots are free or a worker is
-// red (about 67 minutes), and every six hours a housekeeping check; a completed goal asks
-// for a lab status report (pe-status-report). Slots are DSH's own subagent parallelism
-// limit (Settings → Subagent, `maxActiveSubagents`). Checks wait while the manager works,
-// spend no goal round, carry no operator authority, and stop no worker.
-// They arrive as DSH `schedule` messages, which DSH's chat shows as an automation task.
+// Shared capacity/progress decisions wake an idle manager during an armed goal.
+// Housekeeping is independent. Checks spend no goal round and stop no worker.
 {
-  const IDLE_MS = 15 * 60_000, RED_MS = 67 * 60_000
+  const progress = new Map()
   const agents = new Map(), timers = new Map(), waited = new Map(), since = new Map() // since: this activation's start
   const labOf = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return d; if (d === path.dirname(d)) return undefined } }
   const labText = root => { try { return fs.readFileSync(path.join(root, '.research', 'LAB.md'), 'utf8') } catch { return '' } }
@@ -41,9 +35,10 @@
 It's been about ${span(interval)}: a sanity check. At a good pause, come up for air.
 Clear your head and reevaluate: is the lab still chasing the most useful question?
 - Tidy finished scratch work and update the task list and lab notes. Keep anything still in use, cited, or waiting to be saved; pe-fleet has cleanup details. Commit loose ends and sync if enabled.
-- File a lab status report for the operator with pe-status-report, and commit it.
+- Use pe-status-report to add useful changes for the operator; link existing evidence.
 ${tools.length ? `- Lab tools differ from runtime copies: ${tools.join(', ')} (a \`.shipped\` copy beside each). Compare versions before replacing anything; the runtime copy may be older. See pe-fleet.\n` : ''}- Is there an idea we dismissed too quickly? Give one or two to a fresh reader who goes back to the source or proof. Leave room for new work too.
 - If it's been a while, try pe-muse or a web round. Follow a promising angle with a researcher.
+${supervision.nudge('housekeeping')}
 Then go back to the question you choose.
 </housekeeping>`)
     return true
@@ -58,7 +53,8 @@ Then go back to the question you choose.
     if (!root || !armed(agent) || agent.status !== 'idle') return
     if (housekeep(agent, root)) return
     if (!workers(agent).length) return
-    const delay = IDLE_MS * 2 ** Math.min(waited.get(agent.id) ?? 0, 2), g0 = armed(agent)
+    const delay = supervision.delay(labText(root), waited.get(agent.id) ?? 0), g0 = armed(agent)
+    if (!delay && !every(root)) return
     // Wake for housekeeping too, so a long wait between checks doesn't hold it back.
     const due = every(root) ? tidied(agent, g0) + every(root) - Date.now() : Infinity
     const started = Date.now()
@@ -68,8 +64,8 @@ Then go back to the question you choose.
       if (!g || agents.get(agent.id) !== agent || agent.status !== 'idle' || agent.inbox.nextTurn.length || !live.length) return
       if (housekeep(agent, root)) return
       if (Date.now() - started < delay) return schedule(agent) // Woke for housekeeping that moved on.
-      const limit = slots(), red = live.filter(w => now - since.get(w.id) >= RED_MS)
-      const why = limit - live.length >= 2 ? 'with at least two free subagent slots' : red.length ? "while a worker has run past about 67 minutes" : ''
+      const limit = slots(), inspection = supervision.inspect({workers:live.map(w=>({id:w.id,since:progress.get(w.id)?.since ?? since.get(w.id)})),slots:limit,now,text:labText(root)})
+      const red = inspection.stalled, why = inspection.reason
       if (!why) return schedule(agent) // A full, young fleet: look again later.
       const n = (waited.get(agent.id) ?? 0) + 1
       waited.set(agent.id, n)
@@ -77,19 +73,39 @@ Then go back to the question you choose.
 Objective: ${JSON.stringify(g.objective)}
 The manager has been idle for ${span(delay)} ${why}.
 Now: ${Math.max(0, limit - live.length)}/${limit} slots free. Running workers (age):
-${live.map(w => `- ${w.id}: ${age(now - since.get(w.id))}`).join('\n')}
-${red.length ? `\nRed: ${red.map(w => w.id).join(', ')}. Take a look at each: its scratch, its session, or a message. A message waits for the worker's current command; interrupt_agent then send_message stops that command so it reads you now.\n` : ''}
-Briefly check whether these experiments are still useful and whether an independent question deserves attention. You may investigate, delegate, steer a worker, or keep waiting. Age alone is not evidence of failure. Do not stop work or invent tasks just to fill slots. If waiting is appropriate, end this turn; the next check comes after ${span(IDLE_MS * 2 ** Math.min(n, 2))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
+${live.map(w => `- ${w.id}: ${age(now - since.get(w.id))}; ${progress.get(w.id)?.activity || 'running'} for ${age(now - (progress.get(w.id)?.since ?? since.get(w.id)))}`).join('\n')}
+${red.length ? `\nProgress to inspect: ${red.map(w => w.id).join(', ')}. Take a look at each: its scratch, its session, or a message. A message waits for the worker's current command; interrupt_agent then send_message stops that command so it reads you now.\n` : ''}
+${supervision.nudge('capacity', n - 1)}
+Give available researchers distinct questions worth pursuing. Inspect missing progress without assuming a long command or provider wait is failure. You may investigate, delegate, steer a worker, or wait when that protects useful work. If waiting is appropriate, end this turn; the next check comes after ${span(supervision.delay(labText(root), n))} idle, or sooner once a worker finishes. Fleet checks use no goal rounds.
 </fleet_check>`)
-    }), Math.max(1000, Math.min(delay, due)))
+    }), Math.max(1000, Math.min(delay || Infinity, due)))
     timer.unref?.()
     timers.set(agent.id, timer)
   })
-  // A worker launch or completion, or the operator speaking, returns checks to fifteen minutes.
+  // A worker launch or completion, or the operator speaking, resets repeated-check suppression.
   const reset = id => { if (id) waited.delete(id) }
-  ctx.on('agent/created', safe(({agent}) => { agents.set(agent.id, agent); reset(agent.session.header.parentSession) }))
+  ctx.on('session/event', safe((session, event) => {
+    const root=labOf(ctx.get('workingDirectory')?.get(session) ?? session.header.cwd)
+    if(root && event?.type==='user/message' && event.data.source?.check==='operator-answer')
+      questions.acknowledge(root,[event.data.source.delivery])
+    if(root && event?.type==='tool/result' && session.header.origin==='subagent')
+      questions.integrateDrafts(root)
+    if (!['assistant/message','assistant/attempt','tool/call','tool/result'].includes(event?.type)) return
+    progress.set(session.header.id, {since:Date.now(),activity:event.type==='tool/call'?'command '+(event.data?.name||'running'):event.type})
+  }))
+  ctx.on('agent/created' , safe(({agent}) => { agents.set(agent.id, agent); reset(agent.session.header.parentSession) }))
   ctx.on('agent/disposed', safe(({agent}) => { if (agents.get(agent.id) === agent) { agents.delete(agent.id); since.delete(agent.id) } cancel(agent); waited.delete(agent.id) }))
+  const answering = new Set()
   ctx.on('agent/status', safe(({agent, status}) => {
+    const root=manager(agent)
+    if (status === 'idle' && root) {
+      try { record.refresh(root) } catch (error) { console.warn('PE report: ' + error.message) }
+    }
+    if (status==='idle' && root && !answering.has(agent.id)) {
+      const delivered=agent.session.snapshotEvents().filter(e=>e.type==='user/message'&&e.data.source?.check==='operator-answer').map(e=>e.data.source.delivery)
+      answering.add(agent.id)
+      try {for(const q of questions.pending(root,delivered)) agent.followup({id:process.getBuiltinModule('node:crypto').randomUUID(),role:'user',source:{kind:'schedule',check:'operator-answer',delivery:q.delivery},content:[{type:'text',text:`Operator answer to ${q.id}: ${q.question}\n${q.answer}`}]})}finally{answering.delete(agent.id)}
+    }
     agents.set(agent.id, agent)
     if (status === 'running') { if (!since.has(agent.id)) since.set(agent.id, Date.now()) } else since.delete(agent.id)
     const parent = agents.get(agent.session.header.parentSession)
@@ -100,7 +116,7 @@ Briefly check whether these experiments are still useful and whether an independ
   // A completed goal files a status report for the operator, as in Pi.
   ctx.on('goal/changed', safe(({agent, change}) => {
     if (change?.operation === 'complete' && manager(agent)) send(agent, 'status-report', `<status_report>
-The goal is complete. File this lab's status report for the operator with pe-status-report.
+The goal is complete. Use pe-status-report to add what the result changes for the operator, with its evidence. Existing coverage needs no duplicate report.
 It is filed once committed, and pushed when sync is on.
 </status_report>`)
     schedule(agent)

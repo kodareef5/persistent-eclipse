@@ -1,10 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, appendFileSync, existsSync, symlinkSync, lstatSync, cpSync} from 'node:fs';
 import {join, dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFileSync} from 'node:child_process';
-import {aggregate, archive, captureSession, captureSearch, collect, indexSession, readLog, refreshReport, scheduleReport, reportData, renderReport, verifyArchive} from './history.mjs';
+import {aggregate, archive, captureSession, captureSearch, collect, indexSession, readLog, refreshReport, scheduleReport, reportData, renderReport, verifyArchive, usageBreakdown, writeActivity, RECEIPT_FORMAT} from './history.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'pe-history-')), lab = join(root, 'lab with spaces');
@@ -122,6 +123,82 @@ test('a failed fallback retains known spend and leaves missing usage unknown', (
   assert.equal(got.rows[0].sums.cost, .0012);
   assert.equal(got.rows[0].coverage.cost, 1);
   assert.equal(got.receipts[1].cost, null);
+});
+
+test('search identity evidence reconciles old selected-call IDs with complete attempts, never by equal values', t => {
+  const {lab, put} = fixture(t), sha = s => createHash('sha256').update(s).digest('hex');
+  const one = {prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, cost: 1};
+  const two = {prompt_tokens: 20, completion_tokens: 3, total_tokens: 23, cost: 2};
+  const raw = {model: 'search', retrieved: '2026-11-01', query: 'PRIVATE_QUERY', usage: two,
+    attempts: [{engine: 'a', results: 0, usage: one}, {engine: 'b', results: 1, usage: two}]};
+  const legacy = {...aggregate([], [{model: raw.model, usage: two}]).receipts[0],
+    identity: sha(`search:${sha(JSON.stringify(raw))}`), origin: {id: 'a'.repeat(32), label: 'lab'}};
+  const fresh = aggregate([], [raw]);
+  for (const got of [aggregate([], [raw], [legacy]), aggregate([], [], [legacy, ...fresh.receipts])]) {
+    assert.equal(got.calls, 2); assert.equal(got.rows[0].sums.total, 35); assert.equal(got.rows[0].sums.cost, 3);
+    assert.equal(got.searchReconciliation.reconciled, 1);
+    assert.ok(got.receipts.every(c => c.origin?.id === legacy.origin.id));
+  }
+  const partial = aggregate([], [], [legacy, fresh.receipts[0]]);
+  assert.equal(partial.calls, 2); assert.equal(partial.searchReconciliation.incomplete, 1);
+  const unrelated = {...raw, query: 'ANOTHER_PRIVATE_QUERY'};
+  assert.equal(aggregate([], [raw, unrelated], [legacy]).calls, 4, 'equal usage in separate searches remains separate');
+  const single = {...raw, attempts: [raw.attempts[1]]};
+  const oldSingle = {...legacy, identity: sha(`search:${sha(JSON.stringify(single))}`)};
+  assert.equal(aggregate([], [single], [oldSingle]).rows[0].sums.total, 23);
+
+  // A raw receipt enriches earlier immutable attempts with identity evidence.
+  // After sharing that enrichment, a peer with no raw queries sees the same sum.
+  const old = JSON.stringify({format: RECEIPT_FORMAT, producer: legacy.origin,
+    calls: [legacy, ...fresh.receipts.map(({searchReceipt, ...c}) => c)]});
+  const historical = put('.research/activity/older.json', old);
+  const rawPath = put('.research/local/search/search.json', JSON.stringify(raw));
+  refreshReport(lab, true);
+  assert.equal(reportData(lab).usage.rows[0].sums.total, 35);
+  assert.equal(readFileSync(historical, 'utf8'), old);
+  rmSync(rawPath);
+  const peer = reportData(lab); assert.equal(peer.usage.rows[0].sums.total, 35);
+  assert.equal(peer.usage.calls, 2);
+  writeActivity(lab);
+  assert.ok(!JSON.stringify(peer.usage).includes('PRIVATE_QUERY'));
+  assert.ok(!readFileSync(join(lab, '.research/activity/README.md'), 'utf8').includes('local only'));
+});
+
+test('contradictory search counts survive ordering, enrichment and shared receipt replay', t => {
+  const {lab, put} = fixture(t), sha = s => createHash('sha256').update(s).digest('hex');
+  const raw = {model: 'search', usage: {total_tokens: 23}, attempts: [
+    {usage: {total_tokens: 12}}, {usage: {total_tokens: 23}},
+  ]};
+  const fresh = aggregate([], [raw]).receipts;
+  const parent = {...fresh[1], identity: sha(`search:${sha(JSON.stringify(raw))}`)};
+  delete parent.searchReceipt;
+  const changed = n => ({...fresh[0], searchReceipt: {...fresh[0].searchReceipt, count: n}});
+  const permutations = xs => xs.length ? xs.flatMap((x, i) => permutations(xs.filter((_, j) => j !== i)).map(rest => [x, ...rest])) : [[]];
+  for (const [inputs, total] of [[[parent, changed(1), fresh[0]], 35],
+    [[parent, fresh[0], changed(3), fresh[1]], 58]]) {
+    for (const order of permutations(inputs)) {
+      const got = aggregate([], [], order);
+      assert.equal(got.receipts.reduce((sum, c) => sum + c.total, 0), total);
+      assert.deepEqual(got.searchReconciliation, {reconciled: 0, incomplete: 1});
+      assert.ok(got.receipts.some(c => c.identity === parent.identity));
+      const evidence = got.receipts.find(c => c.identity === fresh[0].identity).searchReceipt;
+      assert.deepEqual(evidence.conflictingCounts, total === 35 ? [1, 2] : [2, 3]);
+      // A later copy with valid counts or richer attribution cannot erase dissent.
+      const replay = aggregate([], [], [...got.receipts, {...fresh[0], origin: {id: 'a'.repeat(32), label: 'peer'}}]);
+      assert.equal(replay.receipts.reduce((sum, c) => sum + c.total, 0), total);
+      assert.deepEqual(replay.searchReconciliation, got.searchReconciliation);
+    }
+  }
+  const merged = aggregate([], [], [parent, fresh[0], changed(3), fresh[1]]);
+  const path = put('.research/activity/conflict.json', JSON.stringify({format: RECEIPT_FORMAT, producer: {id: 'a'.repeat(32)}, updated: '2026-11-01T00:00:00Z', calls: merged.receipts}));
+  const original = readFileSync(path, 'utf8');
+  const peer = reportData(lab);
+  assert.equal(peer.usage.calls, 3);
+  assert.deepEqual(peer.usage.searchReconciliation, {reconciled: 0, incomplete: 1});
+  assert.deepEqual(peer.usage.receipts.find(c => c.identity === fresh[0].identity).searchReceipt.conflictingCounts, [2, 3]);
+  assert.ok(peer.warnings.some(w => w.includes('conflicting attempt records')));
+  writeActivity(lab);
+  assert.equal(readFileSync(path, 'utf8'), original, 'historical evidence is never rewritten');
 });
 
 test('archive restores reachable Git history, staged and loose work, logs, and extra inputs', async t => {
@@ -334,7 +411,7 @@ test('new receipt batches never rewrite old calls or multiply them across refres
   for (let round = 0; round < 8; round++) {
     if (round) events.push({...piEvents[2], id: `call-${round}`});
     captureSession(lab, 'pi', header, events, {observedFrom: 0}); refreshReport(lab, true);
-    const root = join(lab, '.research/activity'), dir = join(root, readdirSync(root)[0]);
+    const root = join(lab, '.research/activity'), dir = join(root, readdirSync(root).find(name => /^[a-f0-9]{32}$/.test(name)));
     let calls = 0;
     for (const name of readdirSync(dir)) {
       const body = readFileSync(join(dir, name), 'utf8');
@@ -371,4 +448,19 @@ test('large indexed labs report off the caller event loop and coalesce a final r
   const text = readFileSync(join(lab, '.research/local/ACTIVITY.md'), 'utf8');
   assert.ok(text.includes('122 recorded calls'));
   assert.equal(reportData(lab).collective.tokens, 122 * 180);
+});
+
+
+test('mission changes attribute only new calls and retain task, model, and unknown cost', t => {
+  const {lab}=fixture(t),header={id:'mission-switch',cwd:lab};
+  captureSession(lab,'pi',header,piEvents,{mission:'math',packRevision:'math-1',taskId:'T-1',observedFrom:0});
+  const extra={...piEvents[2],id:'next',parentId:'c',message:{...piEvents[2].message,usage:{input:7,output:2}}};
+  captureSession(lab,'pi',header,[...piEvents,extra],{mission:'blue',packRevision:'blue-1',taskId:'T-2',observedFrom:3});
+  captureSession(lab,'pi',header,[...piEvents,extra],{mission:'blue',packRevision:'blue-1',taskId:'T-2',observedFrom:3});
+  const data=reportData(lab),rows=usageBreakdown(data);
+  assert.equal(data.usage.calls,2);
+  assert.equal(rows.find(r=>r.mission==='math').agent,'T-1');
+  assert.equal(rows.find(r=>r.mission==='math').sums.input,100);
+  const blue=rows.find(r=>r.mission==='blue');
+  assert.equal(blue.agent,'T-2');assert.equal(blue.packRevision,'blue-1');assert.equal(blue.coverage.cost||0,0);
 });

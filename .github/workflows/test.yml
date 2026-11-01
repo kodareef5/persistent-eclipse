@@ -1,0 +1,39 @@
+# Optional hosted verification. Normal development tests run locally.
+name: test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+
+jobs:
+  test:
+    runs-on: ${{ vars.PE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Build
+        run: |
+          python3 src/build.py
+          git diff --exit-code -- cordis.patch.yml src/dsh-client.bundle.js src/pack-defaults.json
+
+      - name: Install Pi
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pe-tools" --no-save --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0
+          echo "$RUNNER_TEMP/pe-tools/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: |
+          npm test
+          node src/test-pi.mjs pi
+          node src/test-install.mjs pi

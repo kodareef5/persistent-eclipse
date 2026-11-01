@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "id": "blue",
+  "dependencies": [
+    "common"
+  ],
+  "skills": {
+    "pe-challenger": "skills/challenger.md",
+    "pe-cvss": "skills/cvss.md",
+    "pe-dead-end": "skills/dead-end.md",
+    "pe-intel": "skills/intel.md",
+    "pe-layered-challenge": "skills/layered-challenge.md",
+    "pe-muse": "skills/muse.md",
+    "pe-patch": "skills/patch.md",
+    "pe-reader": "skills/reader.md",
+    "pe-reporter": "skills/reporter.md",
+    "pe-survey": "skills/survey.md"
+  },
+  "resources": [
+    "mission.md",
+    "skills/challenger.md",
+    "skills/cvss.md",
+    "skills/dead-end.md",
+    "skills/intel.md",
+    "skills/layered-challenge.md",
+    "skills/muse/connections.md",
+    "skills/muse.md",
+    "skills/patch.md",
+    "skills/reader.md",
+    "skills/reporter/cyber.md",
+    "skills/reporter.md",
+    "skills/survey.md",
+    "skills/muse/failure-patterns.md",
+    "skills/muse/patch-archaeology.md",
+    "skills/muse/partial-failure.md",
+    "skills/muse/feedback-loops.md",
+    "skills/muse/guarantees.md"
+  ],
+  "mission": "mission.md"
+}

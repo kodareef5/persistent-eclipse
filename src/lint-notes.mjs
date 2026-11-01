@@ -1,9 +1,10 @@
-// Usage: node .research/tools/lint-notes.mjs [--dir DIR] [--draft] [--advice] [--push] [--strict]
+// Usage: node .research/tools/lint-notes.mjs [--dir DIR] [--draft] [--advice] [--peers] [--push] [--strict]
 // node lint-notes.mjs --sha prints the sha256 of this file, to check a copy is exact.
 // node lint-notes.mjs --qualify <lab> [--write] renames this lab's R-<n> and REQ-<n> to
 // R-<lab>-<n> and REQ-<lab>-<n> before it joins a shared lab; without --write it only reports.
 // --push also checks what a push would send: credentials, large files, and note targets
 // that were never committed.
+import { checkPush } from './push-check.mjs';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -21,6 +22,7 @@ const pushing = argv.includes("--push");
 const showAdvice = argv.includes("--advice");
 // --strict fails on advice too, for anyone who wants the conventions enforced.
 const strict = argv.includes("--strict");
+const showPeers = argv.includes("--peers") || strict;
 const dirFlag = argv.indexOf("--dir");
 const dir = dirFlag >= 0 ? argv[dirFlag + 1] : ".research/notes";
 if (dir === undefined || dir.startsWith("--")) {
@@ -71,10 +73,6 @@ const MENTION_RE = /(?<![\w:-])R-(?:[a-z][a-z0-9]{1,11}-)?[1-9][0-9]*\b/g;
 const MESSAGE_RE = /^([0-9]{4}-[0-9]{2}-[0-9]{2})-([a-z][a-z0-9]{1,11})-[a-z0-9][a-z0-9-]*\.md$/;
 const MESSAGE_KINDS = new Set(["hello", "request", "claim", "offer", "result", "opinion", "question", "reply"]);
 const MESSAGE_STATES = new Set(["open", "taken", "done", "declined", "withdrawn"]);
-// The same patterns pack.mjs warns on before an export.
-const SECRETS = [/sk-or-v1-[A-Za-z0-9]{20,}/, /\bsk-[A-Za-z0-9_-]{32,}/, /\bgh[pousr]_[A-Za-z0-9]{30,}/, /github_pat_[A-Za-z0-9_]{30,}/,
-  /\bAKIA[0-9A-Z]{16}\b/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /"refresh_token"\s*:\s*"[^"]{8,}/, /\bBearer [A-Za-z0-9._~+\/-]{24,}/, /\bxox[abprs]-[A-Za-z0-9-]{10,}/];
-const LARGE = 5 * 2 ** 20;
 
 const members = research === undefined || !existsSync(join(research, "labs")) ? []
   : readdirSync(join(research, "labs"), { withFileTypes: true })
@@ -245,7 +243,6 @@ const files = (existsSync(dir) ? readdirSync(dir) : [])
   .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
 const notes = new Map();
-const cited = []; // [note id, target, path under .research] for the push check
 for (const file of files) {
   const id = basename(file, ".md");
   const text = readFileSync(join(dir, file), "utf8");
@@ -297,7 +294,6 @@ for (const file of files) {
       const path = targetPath(target);
       const dep = /^vendor\/([^/]+)\//.exec(path);
       if (dep !== null) {
-        cited.push([id, target, path]);
         if (research === undefined) warn(id, `target "${target}" needs a .research root to verify the vendor copy`);
         else if (!existsSync(join(research, "vendor", dep[1])))
           warn(id, `target "${target}" names vendor/${dep[1]}/, which does not exist`);
@@ -309,7 +305,6 @@ for (const file of files) {
       } else if (path.startsWith("scratch/") && !draft) {
         warn(id, `target "${target}" is in scratch/, which the lab does not keep; promote the artifact to runs/, reports/, intel/, or lean/ and target it there`);
       } else if (/^(intel|runs|reports|reviews|notes|scratch|vendor|lean|patches)\//.test(path)) {
-        cited.push([id, target, path]);
         if (research === undefined) warn(id, `target "${target}" needs a .research root`);
         else if (!existsSync(join(research, path)))
           warn(id, `target "${target}" names a file that is not in .research/`);
@@ -453,60 +448,12 @@ if (pushing && research !== undefined) {
   // The Sync line alone: `[ \t]` never reads the next line of LAB.md as the branch.
   const sync = /^[ \t]*Sync:[ \t]*([^\s(]+)(?:[ \t]+([^\s(]+))?/m.exec(policy);
   const remote = sync !== null && sync[1].toLowerCase() !== "off" ? sync[1] : "origin", branch = sync?.[2] ?? "main";
-  let head;
-  try { head = git("rev-parse", "--verify", "HEAD").trim(); } catch { warn("push", "no commit to check; commit first"); }
-  if (head !== undefined) {
-    let base = [];
-    try { git("rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${branch}`); base = ["--not", `refs/remotes/${remote}/${branch}`]; }
-    catch { /* nothing fetched from the lab branch yet: all of history is outgoing */ }
-    let destination;
-    try { destination = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}").trim(); } catch { destination = undefined; }
-    if (destination === undefined) advise("push", `git push has no default destination here; push explicitly to ${remote} ${branch}, or set the upstream to ${remote}/${branch}`);
-    else if (destination !== `${remote}/${branch}`) warn("push", `git push would go to ${destination}, but the lab shares ${remote}/${branch}; push explicitly to ${remote} ${branch}, or set the upstream`);
+  try {
+    const checked = await checkPush(dirname(research), {remote, branch, checkDefault: true});
+    for (const problem of checked.problems) problems.push(problem);
+    for (const item of checked.advice) advice.push(item);
+  } catch (error) { warn("push", "cannot check outgoing history: " + error.message); }
 
-    const prefix = git("rev-parse", "--show-prefix").trim();
-    const current = new Map(); // repository path -> blob at HEAD
-    for (const row of git("ls-tree", "-r", "--full-tree", "-z", "HEAD").split("\0").filter(Boolean)) {
-      const tab = row.indexOf("\t"), [, type, object] = row.slice(0, tab).split(" ");
-      if (type === "blob") current.set(row.slice(tab + 1), object);
-    }
-    const paths = new Map(); // outgoing object -> a path it was committed at
-    for (const line of git("rev-list", "--objects", "HEAD", ...base).split("\n")) {
-      const space = line.indexOf(" ");
-      if (space > 0 && !paths.has(line.slice(0, space))) paths.set(line.slice(0, space), line.slice(space + 1));
-    }
-    const kinds = paths.size === 0 ? "" : execFileSync("git", ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
-      { cwd: dirname(research), input: [...paths.keys()].join("\n") + "\n", encoding: "utf8", maxBuffer: 1 << 30 });
-    const allowed = existsSync(join(research, "LARGE.md"))
-      ? new Set([...readFileSync(join(research, "LARGE.md"), "utf8").matchAll(/`([^`]+)`/g)].map((m) => m[1])) : new Set();
-    const where = (object, path) => current.get(path) === object ? path : `${path} (in an outgoing commit, no longer at HEAD)`;
-    const text = [];
-    for (const row of kinds.split("\n").filter(Boolean)) {
-      const [object, type, size] = row.split(" ");
-      if (type !== "blob") continue;
-      const path = paths.get(object), bytes = Number(size);
-      if (bytes > LARGE && !allowed.has(path))
-        warn(where(object, path), `${(bytes / 2 ** 20).toFixed(1)} MiB; reference it by origin, size, and sha256 as pe-export does, or list it in .research/LARGE.md with the reason`);
-      else if (bytes <= LARGE) text.push(object);
-    }
-    if (text.length > 0) {
-      const out = execFileSync("git", ["cat-file", "--batch"], { cwd: dirname(research), input: text.join("\n") + "\n", maxBuffer: 1 << 30 });
-      let at = 0;
-      for (const object of text) {
-        const nl = out.indexOf(10, at), head = out.subarray(at, nl).toString().split(" ");
-        const size = Number(head[2]), body = out.subarray(nl + 1, nl + 1 + size);
-        at = nl + 1 + size + 1;
-        if (body.subarray(0, 8192).includes(0)) continue;
-        body.toString("utf8").split("\n").forEach((line, i) => {
-          if (SECRETS.some((re) => re.test(line)))
-            warn(`${where(object, paths.get(object))}:${i + 1}`, "looks like a credential; remove it, and rewrite any unpushed commit that carries it, before pushing");
-        });
-      }
-    }
-    for (const [id, target, path] of cited)
-      if (!current.has(`${prefix}.research/${path}`) && existsSync(join(research, path)))
-        warn(id, `target "${target}" is not committed, so other labs cannot open it`);
-  }
 }
 
 const byKind = {};
@@ -529,14 +476,32 @@ console.log(`states: ${tally(byState)}`);
 console.log(`checks: ${tally(byCheck)}`);
 if (open > 0 || mine > 0) console.log(`inbox: ${open} open${here === undefined ? "" : `, ${mine} to ${here}`}`);
 const width = Math.max(5, ...[...notes.keys()].map((id) => id.length));
+const peerOf = text => {
+  const id = /^R-([a-z][a-z0-9]{1,11})-[1-9][0-9]*(?:\.md)?(?=:|$)/.exec(text)?.[1];
+  return here && id && id !== here ? id : null;
+};
+const peerNotes = [...notes.keys()].filter(id => peerOf(id));
 for (const [id, { fm }] of notes) {
+  if (!showPeers && peerOf(id)) continue;
   const shown = Array.isArray(fm.labels) ? fm.labels.join(", ") : (fm.labels ?? "");
   console.log(`  ${id.padEnd(width)} ${String(fm.kind ?? "-").padEnd(11)} ${String(fm.state ?? "-").padEnd(10)} ${shown}`);
+}
+if (!showPeers && peerNotes.length) console.log(`  ${peerNotes.length} peer notes; --peers lists them`);
+
+function findings(lines, label) {
+  const peers = {};
+  for (const line of lines) {
+    const peer = peerOf(line);
+    if (peer && !showPeers) peers[peer] = (peers[peer] || 0) + 1;
+    else console.log(`  - ${line}`);
+  }
+  if (Object.keys(peers).length)
+    console.log(`  Peer ${label}: ${tally(peers)}; --peers lists them. Included in the counts and exit status.`);
 }
 
 if (problems.length > 0) {
   console.log(`\n${problems.length} problem(s):`);
-  for (const problem of problems) console.log(`  - ${problem}`);
+  findings(problems, "problems");
   process.exitCode = 1;
 } else {
   console.log("\nno problems");
@@ -545,7 +510,7 @@ if (problems.length > 0) {
 if (strict && advice.length > 0) process.exitCode = 1;
 if (advice.length > 0 && (showAdvice || strict)) {
   console.log(`\n${advice.length} advice (does not fail lint):`);
-  for (const line of advice) console.log(`  - ${line}`);
+  findings(advice, "advice");
 } else if (advice.length > 0) {
   console.log(`${advice.length} optional suggestion(s); --advice lists them`);
 }

@@ -1,16 +1,21 @@
-# Build cordis.patch.yml and dsh-client.js from src/, test in Pi, and keep main in
-# sync: a push that changes src/ gets the rebuilt files committed
-# back. A push that edits a generated file by hand, so it no longer matches src/, fails
-# instead of being overwritten. Run it by hand with `gh workflow run build.yml`.
-# DSH is not public, so src/check.sh remains the local check for it.
-# The repo variable PE_RUNNER can name a self-hosted runner for pushes and manual runs.
-# Pull requests always run on GitHub's ubuntu-latest, so a fork never runs on it.
+# Build generated artifacts on source/content changes. Heavy tests are manual.
+# PE_RUNNER can select a self-hosted runner; PRs always use GitHub-hosted Ubuntu.
 name: build
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - README.md
+      - src/README.md
+      - src/REMOTE-OPERATOR-COMMS.md
+      - src/banner.svg
   pull_request:
+    paths-ignore:
+      - README.md
+      - src/README.md
+      - src/REMOTE-OPERATOR-COMMS.md
+      - src/banner.svg
   workflow_dispatch:
 
 permissions:
@@ -20,7 +25,7 @@ concurrency:
   group: build-${{ github.ref }}
 
 env:
-  GENERATED: cordis.patch.yml dsh-client.js
+  GENERATED: cordis.patch.yml src/dsh-client.bundle.js src/pack-defaults.json
 
 jobs:
   build:
@@ -57,18 +62,6 @@ jobs:
             echo "::error::This push edits generated files, and they do not match src/. Make the change in src/ (or rebuild after your last src/ edit) and push again."
             exit 1
           fi
-
-      # Into the job's own directory, so a self-hosted runner keeps its machine's own Pi.
-      - name: Install Pi
-        run: |
-          npm install --prefix "$RUNNER_TEMP/pe-tools" --no-save --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0
-          echo "$RUNNER_TEMP/pe-tools/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Test
-        run: |
-          for t in cvss lint pack; do echo "-- $t"; node src/test-$t.mjs; done
-          for t in cells history integrity retry; do echo "-- $t"; node --test src/test-$t.mjs; done
-          echo "-- pi"; node src/test-pi.mjs pi
 
       - name: Commit the rebuilt files
         if: steps.drift.outputs.changed == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

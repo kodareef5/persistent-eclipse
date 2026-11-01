@@ -1,0 +1,25 @@
+// Creates a disposable lab and a local bare remote. Refuses to overwrite anything.
+import {existsSync, mkdirSync, writeFileSync, copyFileSync} from 'node:fs';
+import {resolve, join, dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {execFileSync} from 'node:child_process';
+const engine=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const lab=resolve(process.argv[2] || '../pe-test-lab'), remote=lab+'-remote.git';
+if(existsSync(lab)||existsSync(remote))throw new Error('Choose a new directory; existing labs are never replaced.');
+const put=(name,text)=>{const p=join(lab,name);mkdirSync(dirname(p),{recursive:true});writeFileSync(p,text);};
+const git=(cwd,...args)=>execFileSync('git',['-C',cwd,...args],{stdio:'pipe'});
+put('.research/LAB.md',`# Disposable math lab\n\nWorkers: 2\nSync: origin main (private local fixture)\nFleet check: 5m\nProgress check: 20m\nIdle review: off\nHousekeeping: 6h\n\nOrdinary local reading, edits, proofs, and tests are approved here. Keep experiments within this toy lab. No external services or publication.\n`);
+put('.research/MISSION.md','# Math trial\n\nMode: math-team\n\nInvestigate why the sum of the first n odd numbers is n squared. Try an algebraic argument and a geometric representation. Look for a related question that changes an assumption. Keep evidence and uncertainty clear. This disposable smoke trial finishes after checking the fixture and describing both arguments; it does not arm a persistent goal.\n');
+put('.research/packs.json','{"mission":"math"}\n');
+put('.gitignore','.runtime/\n.research/local/\n.research/scratch/\n');
+put('odd-sums.mjs','import assert from "node:assert/strict";\nfor(let n=0;n<=100;n++)assert.equal(Array.from({length:n},(_,i)=>2*i+1).reduce((a,b)=>a+b,0),n*n);\nconsole.log("101 finite checks passed; the proof still needs an argument.");\n');
+put('README.md','Disposable PE trial. Run `node odd-sums.mjs`. The source fixture and local bare remote belong to this trial only. Runtime profiles and smoke receipts live in .runtime/.\n');
+git(lab,'init','-b','main');git(lab,'config','user.name','PE test lab');git(lab,'config','user.email','pe-test@example.invalid');
+git(lab,'config','pe.packRoot',join(engine,'packs'));
+git(lab,'add','.');git(lab,'commit','-m','Toy mathematical investigation');
+mkdirSync(remote);git(remote,'init','--bare','-b','main');git(lab,'remote','add','origin',remote);git(lab,'config','pe.syncApprovedUrl',remote);git(lab,'push','-u','origin','main');
+put('.runtime/pi/settings.json',JSON.stringify({packages:[engine],extensions:['!**'],skills:['!**']},null,2)+'\n');
+put('.runtime/README.md','Isolated profiles. Pi: PI_CODING_AGENT_DIR=.runtime/pi pi. DSH: DSH_HOME=.runtime/dsh dsh plugin --profile web add '+engine+'\n');
+mkdirSync(join(lab,'.research/tools'),{recursive:true});
+for(const name of ['content.cjs','questions.cjs'])copyFileSync(join(engine,'src',name),join(lab,'.research/tools',name));
+console.log(lab);

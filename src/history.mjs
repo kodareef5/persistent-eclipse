@@ -6,6 +6,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
+import {activityView, activityMarkdown, activityChart, activityFile, timestamp} from './activity.mjs';
+export {activityView, activityChart, activityMarkdown} from './activity.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const json = value => JSON.stringify(value);
@@ -39,6 +41,14 @@ function atomic(file, body) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try { writeFileSync(temp, body, {mode: 0o600, flag: 'wx'}); renameSync(temp, file); }
   finally { rmSync(temp, {force: true}); }
+}
+
+function immutable(file, body) {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, body, {mode: 0o600, flag: 'wx'});
+    try { linkSync(temp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  } finally { rmSync(temp, {force: true}); }
 }
 
 export function historyEnabled(lab) {
@@ -75,10 +85,10 @@ export function indexSession(lab, header, source, meta = {}) {
   const file = join(localDir(lab), 'index', `${sha(`pi:${header.id}`).slice(0,32)}.json`);
   let value = indexes.get(file) ?? (regular(file) ? JSON.parse(readFileSync(file, 'utf8')) : null);
   const owner = producer(lab, true);
-  if (value?.source === source && value.attribution.at(-1)?.producer?.id === owner.id) { indexes.set(file, value); return file; }
+  if (value?.source === source && value.attribution.at(-1)?.producer?.id === owner.id && value.attribution.at(-1)?.mission === meta.mission && value.attribution.at(-1)?.packRevision === meta.packRevision) { indexes.set(file, value); return file; }
   const attribution = value?.attribution ?? [];
-  if (attribution.at(-1)?.producer?.id !== owner.id)
-    attribution.push({type: 'pe-attribution', from: meta.observedFrom ?? 0, producer: owner});
+  if (attribution.at(-1)?.producer?.id !== owner.id || attribution.at(-1)?.mission !== meta.mission || attribution.at(-1)?.packRevision !== meta.packRevision)
+    attribution.push({type: 'pe-attribution', from: meta.observedFrom ?? 0, producer: owner, mission: meta.mission, packRevision: meta.packRevision, taskId: meta.taskId, workType:meta.workType});
   value = {format: 'pe-session-index/1', runtime: 'pi', id: header.id, source, meta, attribution};
   atomic(file, json(value) + '\n'); indexes.set(file, value);
   return file;
@@ -152,14 +162,14 @@ export function captureSession(lab, runtime, header, events, meta = {}) {
   if (!existsSync(file)) writeFileSync(file, json({type: 'pe-session', version: 1, runtime, header, meta,
     capturedAt: new Date().toISOString()}) + '\n', {mode: 0o600, flag: 'wx'});
   const owner = meta.imported ? null : producer(lab, true);
-  if (state.origin !== (owner?.id ?? null)) {
+  if (state.origin !== (owner?.id ?? null) || state.mission !== meta.mission || state.packRevision !== meta.packRevision) {
     // Only newly observed work belongs to this recorder. Imported or inherited
     // history keeps its original attribution, or stays unknown when none exists.
     const from = Math.min(events.length, Math.max(state.length, meta.observedFrom ?? (state.length ? state.length : events.length)));
-    appendFileSync(file, json({type: 'pe-attribution', from, producer: owner}) + '\n');
+    appendFileSync(file, json({type: 'pe-attribution', from, producer: owner, mission: meta.mission, packRevision: meta.packRevision, taskId:meta.taskId, workType:meta.workType}) + '\n');
   }
   if (events.length > state.length) appendFileSync(file, events.slice(state.length).map(json).join('\n') + '\n');
-  cursors.set(base, {file, length: events.length, last: events.length ? json(events.at(-1)) : null, origin: owner?.id ?? null});
+  cursors.set(base, {file, length: events.length, last: events.length ? json(events.at(-1)) : null, origin: owner?.id ?? null, mission:meta.mission, packRevision:meta.packRevision});
   return file;
 }
 
@@ -248,13 +258,26 @@ function piUsage(u) {
 }
 
 export function sessionCalls(log) {
-  const calls = [], tools = [], states = new Map();
+  const calls = [], tools = [], turns = [], states = new Map();
+  let openTurn = null;
   let route = {provider: 'unknown', model: 'unknown', effort: 'unknown'};
   log.events.forEach((e, index) => {
     const key = e.id || (Number.isFinite(e.time) ? `${e.seq}:${e.time}` : `${log.header.id}:${index}`);
     const identity = sha(`${log.runtime}:${key}:${sha(json(e))}`);
-    const owner = log.attribution?.findLast(a => a.from <= index)?.producer ?? null;
-    const attribution = {origin: owner, session: sha(`${log.runtime}:${log.header.id}`), batch: Math.floor(index / 1000), role: log.meta?.role ?? (log.header.origin === 'subagent' ? 'worker' : 'unknown')};
+    const segment = log.attribution?.findLast(a => a.from <= index);
+    const owner = segment?.producer ?? null;
+    const attribution = {mission:segment?.mission ?? 'unknown', packRevision:segment?.packRevision ?? 'unknown', workType:segment?.workType ?? log.meta?.workType ?? 'unknown', taskId:segment?.taskId ?? log.meta?.taskId ?? 'unknown', origin: owner, session: sha(`${log.runtime}:${log.header.id}`), batch: Math.floor(index / 1000), role: log.meta?.role ?? (log.header.origin === 'subagent' ? 'worker' : 'unknown')};
+    // Native DSH turns and Pi's small custom boundary entries carry no prose.
+    const piTurn = e.type === 'custom' && e.customType === 'pe-turn' ? e.data : null;
+    const turnKey = piTurn?.id ?? e.data?.turn;
+    if (piTurn?.phase === 'start' || e.type === 'turn/start') {
+      openTurn = {identity, ...attribution, started: timestamp(piTurn?.time ?? e.time), ended: null, key: turnKey};
+      turns.push(openTurn);
+    } else if ((piTurn?.phase === 'end' || e.type === 'turn/end') && openTurn && openTurn.key === turnKey) {
+      openTurn.ended = timestamp(piTurn?.time ?? e.time);
+      openTurn = null;
+    }
+    if (openTurn) attribution.turn = openTurn.identity;
     if (log.runtime === 'pi') {
       // Branches can return to an earlier model/effort. Follow parents, not just file order.
       route = {...(e.parentId ? states.get(e.parentId) ?? route : {provider: 'unknown', model: 'unknown', effort: 'unknown'})};
@@ -284,26 +307,98 @@ export function sessionCalls(log) {
       }
     }
   });
-  return {calls, tools};
+  return {calls, tools, turns: turns.map(({key, ...turn}) => turn)};
 }
 
 function searchCalls(receipt, origin = null) {
-  const key = `search:${sha(json(receipt))}`;
+  const digest = sha(json(receipt)), key = `search:${digest}`;
   // Attempts are separate billable calls. The top-level usage repeats the selected
   // attempt; use it only for legacy receipts that do not contain attempt records.
   const attempts = Array.isArray(receipt.attempts) && receipt.attempts.length ? receipt.attempts : null;
   return (attempts ?? [receipt]).map((attempt, i) => {
   const u = attempt.usage ?? {}, cached = count(u.prompt_tokens_details?.cached_tokens), prompt = count(u.prompt_tokens);
-  return {identity: sha(attempts ? `${key}:${i}` : key), origin, session: null, role: 'search', provider: 'openrouter', model: receipt.model ?? 'unknown', effort: 'unknown', kind: 'search', time: receipt.retrieved,
+  return {identity: sha(attempts ? `${key}:${i}` : key), mission:receipt.mission || 'unknown', packRevision:receipt.packRevision || 'unknown', origin, session: null, role: 'search', provider: 'openrouter', model: receipt.model ?? 'unknown', effort: 'unknown', kind: 'search', time: receipt.retrieved,
+    ...(attempts ? {searchReceipt: {digest, attempt: i, count: attempts.length}} : {}),
     input: prompt !== null && cached !== null && prompt >= cached ? prompt - cached : null,
     output: count(u.completion_tokens), cacheRead: cached, cacheWrite: null,
     reasoning: count(u.completion_tokens_details?.reasoning_tokens), total: total(u.total_tokens, [u.prompt_tokens, u.completion_tokens]), cost: number(u.cost), costKind: 'reported'};
   });
 }
 
-export function aggregate(logs, search = [], shared = []) {
+function searchEvidence(call) {
+  const e = call.searchReceipt;
+  if (!(call.kind === 'search' && e && /^[a-f0-9]{64}$/.test(e.digest) &&
+    Number.isSafeInteger(e.count) && Number.isSafeInteger(e.attempt) &&
+    e.count > 0 && e.attempt >= 0 && e.attempt < e.count &&
+    call.identity === sha(`search:${e.digest}:${e.attempt}`))) return null;
+  // Preserve contradictory declarations across aggregation and metadata sharing.
+  // These are claims about the same hashed receipt, not additional observations.
+  if (e.conflictingCounts != null && (!Array.isArray(e.conflictingCounts) ||
+    !e.conflictingCounts.every(n => Number.isSafeInteger(n) && n > e.attempt))) return null;
+  const counts = [...new Set([e.count, ...(e.conflictingCounts ?? [])])].sort((a, b) => a - b);
+  return {digest: e.digest, attempt: e.attempt, count: counts[0],
+    ...(counts.length > 1 ? {conflictingCounts: counts} : {})};
+}
+
+// Old readers emitted one selected-call ID for the whole search receipt. New
+// readers emit its attempts. The original receipt hash proves the relationship;
+// equal costs/tokens never do. Wait for every attempt before replacing the parent
+// in a view, so partial synchronization cannot drop the only known observation.
+function reconcileSearch(unique) {
+  const groups = new Map();
+  for (const call of unique.values()) {
+    const e = searchEvidence(call);
+    if (!e) continue;
+    if (!groups.has(e.digest)) groups.set(e.digest, {count: e.count, attempts: new Set(), identities: [], conflict: false});
+    const group = groups.get(e.digest);
+    group.conflict ||= group.count !== e.count || !!e.conflictingCounts;
+    group.attempts.add(e.attempt);
+    group.identities.push(call.identity);
+  }
+  let reconciled = 0, incomplete = 0;
+  for (const [digest, group] of groups) {
+    const parent = sha(`search:${digest}`);
+    if (unique.get(parent)?.kind !== 'search') continue;
+    if (!group.conflict && group.attempts.size === group.count) {
+      const older = unique.get(parent);
+      for (const identity of group.identities) {
+        const call = unique.get(identity);
+        // The receipt identifies the originating search, even if a newer reader
+        // did not know its lab. Never inherit the parent's selected-call usage.
+        const provenance = Object.fromEntries(['origin', 'mission', 'packRevision', 'taskId', 'workType', 'disputed']
+          .map(key => [key, older[key]]));
+        unique.set(call.identity, mergeObservation(call, provenance));
+      }
+      unique.delete(parent);
+      reconciled++;
+    } else incomplete++;
+  }
+  return {reconciled, incomplete};
+}
+
+function mergeObservation(old, next) {
+  // Enrich older receipt versions without counting them as new observations.
+  const preferred = !old.origin && next.origin ? next : old;
+  const other = preferred === old ? next : old;
+  const result = {...preferred};
+  for (const [key, value] of Object.entries(other))
+    if (result[key] == null || result[key] === 'unknown') result[key] = value;
+  const evidence = [searchEvidence(old), searchEvidence(next)].filter(Boolean);
+  if (evidence.length) {
+    const counts = [...new Set(evidence.flatMap(e => e.conflictingCounts ?? [e.count]))].sort((a, b) => a - b);
+    result.searchReceipt = {...evidence[0], count: counts[0]};
+    if (counts.length > 1) result.searchReceipt.conflictingCounts = counts;
+  }
+  if (old.disputed || next.disputed || (old.origin && next.origin && old.origin.id !== next.origin.id)) {
+    result.origin = null;
+    result.disputed = true;
+  }
+  return result;
+}
+
+export function aggregate(logs, search = [], shared = [], sharedTurns = []) {
   const seen = new Set(), seenTools = new Set(), rows = new Map(), toolCounts = Object.create(null), sessions = new Map();
-  const candidates = [], unique = new Map();
+  const candidates = [], unique = new Map(), turnCandidates = [...sharedTurns];
   let duplicateCalls = 0, calls = 0, unmetered = 0;
   const add = c => {
     if (seen.has(c.identity)) { duplicateCalls++; return; }
@@ -320,7 +415,8 @@ export function aggregate(logs, search = [], shared = []) {
     }
   };
   for (const log of logs) {
-    const {calls: list, tools} = sessionCalls(log);
+    const {calls: list, tools, turns} = sessionCalls(log);
+    turnCandidates.push(...turns);
     const id = `${log.runtime}:${log.header.id}`;
     sessions.set(id, {id: log.header.id, runtime: log.runtime, role: log.meta?.role ?? (log.header.origin === 'subagent' ? 'worker' : 'unknown'),
       parent: log.meta?.parentSession ?? log.header.parentSession ?? null, file: log.file, calls: list.length, unmetered: list.filter(c => c.input == null || c.output == null).length});
@@ -332,13 +428,19 @@ export function aggregate(logs, search = [], shared = []) {
     const old = unique.get(c.identity);
     if (old) {
       duplicateCalls++;
-      if (old.disputed || c.disputed) unique.set(c.identity, {...old, origin: null, disputed: true});
-      else if (old.origin && c.origin && old.origin.id !== c.origin.id) unique.set(c.identity, {...old, origin: null, disputed: true});
-      else if (!old.origin && c.origin && !old.disputed) unique.set(c.identity, c);
+      unique.set(c.identity, mergeObservation(old, c));
     } else unique.set(c.identity, c);
   }
+  const searchReconciliation = reconcileSearch(unique);
   const receipts = [...unique.values()]; receipts.forEach(add);
-  return {calls, unmetered, duplicateCalls, attributionConflicts: receipts.filter(c => c.disputed).length, receipts,
+  const turns = new Map();
+  for (const turn of turnCandidates) {
+    const old = turns.get(turn.identity);
+    turns.set(turn.identity, old ? mergeObservation(old, turn) : turn);
+    if (old?.ended != null && turn.ended != null && old.ended !== turn.ended)
+      turns.set(turn.identity, {...turns.get(turn.identity), ended: null, disputed: true});
+  }
+  return {calls, unmetered, duplicateCalls, searchReconciliation, attributionConflicts: receipts.filter(c => c.disputed).length, receipts, turns: [...turns.values()],
     rows: [...rows.values()].sort((a, b) => json([a.provider,a.model,a.effort,a.kind]).localeCompare(json([b.provider,b.model,b.effort,b.kind]))), tools: toolCounts, sessions: [...sessions.values()]};
 }
 
@@ -352,31 +454,65 @@ function publicReceipt(c) {
     out.origin = {id: c.origin.id, label: typeof c.origin.label === 'string' ? c.origin.label.slice(0,80) : null};
   }
   if (/^[a-f0-9]{64}$/.test(c.session)) out.session = c.session;
-  for (const field of ['provider', 'model', 'effort', 'kind', 'role', 'costKind']) out[field] = typeof c[field] === 'string' ? c[field].slice(0,200) : 'unknown';
+  if (/^[a-f0-9]{64}$/.test(c.turn)) out.turn = c.turn;
+  if (timestamp(c.time) != null) out.time = timestamp(c.time);
+  for (const field of ['provider', 'model', 'effort', 'kind', 'role', 'costKind', 'mission', 'packRevision', 'taskId', 'workType']) out[field] = typeof c[field] === 'string' ? c[field].slice(0,200) : 'unknown';
+  if (c.searchReceipt != null) {
+    const evidence = searchEvidence(c);
+    if (!evidence) throw new Error('Invalid search receipt identity evidence');
+    out.searchReceipt = evidence;
+  }
   for (const field of ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'total']) if (count(c[field]) !== null) out[field] = c[field];
   if (number(c.cost) !== null) out.cost = c.cost;
   if (c.disputed) out.disputed = true;
   return out;
 }
 
+function publicTurn(turn) {
+  const {identity, origin, session, role, mission, packRevision, taskId, workType, disputed} = publicReceipt(turn);
+  if (timestamp(turn.started) == null) throw new Error('Invalid turn start');
+  return {identity, origin, session, role, mission, packRevision, taskId, workType,
+    started: timestamp(turn.started), ended: timestamp(turn.ended), ...(disputed ? {disputed: true} : {})};
+}
+
+export const RECEIPT_FORMAT = 'pe-activity-receipts/1';
+
 function readShared(lab) {
   const snapshots = [], warnings = [];
   for (const file of files(join(lab, '.research', 'activity'), f => f.endsWith('.json'))) {
     try {
       const value = JSON.parse(readFileSync(file, 'utf8'));
-      if (value.format !== 'pe-activity-receipts/1' || !/^[a-f0-9]{32}$/.test(value.producer?.id) || !Array.isArray(value.calls)
+      if (value.format !== RECEIPT_FORMAT) throw new Error(`Unsupported receipt format ${clean(value.format)}; update PE to read it`);
+      if (!/^[a-f0-9]{32}$/.test(value.producer?.id)
         || !Number.isFinite(Date.parse(value.updated))) throw new Error('Unrecognized activity snapshot');
+      const readEntries = (entries, parse) => {
+        if (entries == null) return [];
+        if (!Array.isArray(entries)) {
+          warnings.push(`${slash(relative(lab, file))}: expected an entry array; field left out`);
+          return [];
+        }
+        return entries.flatMap(entry => {
+          try { return [parse(entry)]; }
+          catch (e) { warnings.push(`${slash(relative(lab, file))}: ${e.message}; entry left out`); return []; }
+        });
+      };
       snapshots.push({producer: {id: value.producer.id, label: typeof value.producer.label === 'string' ? value.producer.label.slice(0,80) : null},
-        updated: value.updated, calls: value.calls.map(publicReceipt)});
+        updated: value.updated, calls: readEntries(value.calls, publicReceipt), turns: readEntries(value.turns, publicTurn)});
     } catch (e) { warnings.push(`${slash(relative(lab, file))}: ${e.message}; left out of totals`); }
   }
-  return {snapshots, warnings, calls: snapshots.flatMap(s => s.calls)};
+  return {snapshots, warnings, calls: snapshots.flatMap(s => s.calls), turns: snapshots.flatMap(s => s.turns)};
 }
 
-function publishActivity(lab, calls) {
+function sharingEnabled(lab) {
   // Match the footer's first-word policy: a note after "off" cannot enable sharing.
   const sync = /^[ \t]*Sync:[ \t]*([^\s(]+)(?:[ \t]+([^\s(]+))?/m.exec(readFileSync(join(lab, '.research', 'LAB.md'), 'utf8'));
-  if (sync?.[1].toLowerCase() === 'off') return;
+  return sync?.[1].toLowerCase() !== 'off';
+}
+
+function publishActivity(lab, calls, turns = []) {
+  if (!sharingEnabled(lab)) return;
+  // Merely viewing a shared record must not register another empty lab.
+  if (!calls.length && !turns.length && !producer(lab)) return;
   const source = producer(lab, true, true), root = join(lab, '.research', 'activity'), dir = join(root, source.id);
   for (const folder of [root, dir]) {
     if (existsSync(folder) && !lstatSync(folder).isDirectory()) throw new Error(`${folder} is not a directory`);
@@ -385,23 +521,28 @@ function publishActivity(lab, calls) {
   // Old mutable snapshots remain readable. New batches contain only facts that
   // haven't arrived through sync yet; naming a lab changes one small label file.
   const fact = c => json({...publicReceipt(c), origin: c.origin ? {id: c.origin.id, label: null} : null});
-  const known = new Set(readShared(lab).calls.map(fact));
+  const shared = readShared(lab);
+  const known = new Set(shared.calls.map(fact));
   const fresh = calls.map(publicReceipt).filter(c => !known.has(fact(c))).sort((a,b) => a.identity.localeCompare(b.identity));
-  const snapshot = calls => ({format: 'pe-activity-receipts/1', producer: source, updated: new Date().toISOString(), calls});
+  const snapshot = calls => ({format: RECEIPT_FORMAT, producer: source, updated: new Date().toISOString(), calls});
   for (let start = 0; start < fresh.length; start += 128) {
     const batch = fresh.slice(start, start + 128), file = join(dir, `batch-${sha(json(batch))}.json`);
-    const temp = `${file}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temp, json(snapshot(batch)) + '\n', {mode: 0o600, flag: 'wx'});
-      try { linkSync(temp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-    } finally { rmSync(temp, {force: true}); }
+    immutable(file, json(snapshot(batch)) + '\n');
+  }
+  const turnFact = t => json({...publicTurn(t), origin: t.origin ? {id: t.origin.id, label: null} : null});
+  const knownTurns = new Set(shared.turns.map(turnFact));
+  const freshTurns = turns.filter(t => timestamp(t.started) != null).map(publicTurn)
+    .filter(t => !knownTurns.has(turnFact(t))).sort((a, b) => a.identity.localeCompare(b.identity));
+  for (let start = 0; start < freshTurns.length; start += 128) {
+    const batch = freshTurns.slice(start, start + 128), file = join(dir, `turns-${sha(json(batch))}.json`);
+    immutable(file, json({...snapshot([]), turns: batch}) + '\n');
   }
   const identity = join(dir, 'identity.json');
   if (!regular(identity) || json(JSON.parse(readFileSync(identity, 'utf8')).producer) !== json(source))
     atomic(identity, json(snapshot([])) + '\n');
 }
 
-function collective(lab, usage, shared, local) {
+function collective(lab, usage, shared, local, includeLocal = true) {
   const sources = new Map();
   const labels = new Map();
   for (const snapshot of [...shared.snapshots].sort((a,b) => a.updated.localeCompare(b.updated))) labels.set(snapshot.producer.id, snapshot.producer.label);
@@ -417,7 +558,7 @@ function collective(lab, usage, shared, local) {
   };
   for (const snapshot of shared.snapshots) {
     source(snapshot.producer, snapshot.updated);
-    for (const c of snapshot.calls) if (c.origin) source(c.origin, snapshot.updated);
+    for (const c of [...snapshot.calls, ...snapshot.turns]) if (c.origin) source(c.origin, snapshot.updated);
   }
   if (local) source(local);
   for (const c of usage.receipts) {
@@ -427,10 +568,14 @@ function collective(lab, usage, shared, local) {
     if (c.total != null) { row.tokens += c.total; row.metered++; }
     if (c.input == null || c.output == null) row.unmetered++;
   }
+  for (const t of usage.turns) {
+    const row = source(t.origin);
+    if (t.session) row.sessions.add(t.session);
+  }
   const declared = join(lab, '.research', 'labs');
   const names = existsSync(declared) && lstatSync(declared).isDirectory()
     ? readdirSync(declared).filter(n => /^[a-z][a-z0-9]{1,11}$/.test(n) && lstatSync(join(declared,n)).isDirectory()) : [];
-  const self = git(lab, ['config', 'pe.lab']); if (self && !names.includes(self)) names.push(self);
+  const self = includeLocal && git(lab, ['config', 'pe.lab']); if (self && !names.includes(self)) names.push(self);
   for (const label of names) if (![...sources.values()].some(s => s.label === label)) sources.set(`declared:${label}`,
     {id: `declared:${label}`, label, updated: null, local: false, calls: null, sessions: new Set(), tokens: null, metered: 0, unmetered: null, receipts: []});
   const labs = new Map();
@@ -447,7 +592,7 @@ function collective(lab, usage, shared, local) {
   }
   const rows = [...labs.values()].map(s => ({...s, sessions: s.sessions.size, models: aggregate([], [], s.receipts).rows, receipts: undefined}))
     .sort((a,b) => a.label.localeCompare(b.label));
-  return {labs: rows, sessions: new Set(usage.receipts.map(c => c.session).filter(Boolean)).size,
+  return {labs: rows, sessions: new Set([...usage.receipts, ...usage.turns].map(c => c.session).filter(Boolean)).size,
     tokens: usage.receipts.reduce((n,c) => n + (c.total ?? 0), 0), metered: usage.receipts.filter(c => c.total != null).length};
 }
 
@@ -485,9 +630,10 @@ export function reportData(lab, {publish = false} = {}) {
     } catch { warnings.push(`Unreadable search receipt: ${relative(lab, file)}`); }
   }
   const localUsage = aggregate(logs, receipts);
-  if (publish) publishActivity(lab, localUsage.receipts);
-  const shared = readShared(lab), usage = aggregate(logs, receipts, shared.calls);
+  if (publish) publishActivity(lab, localUsage.receipts, localUsage.turns);
+  const shared = readShared(lab), usage = aggregate(logs, receipts, shared.calls, shared.turns);
   warnings.push(...shared.warnings);
+  if (usage.searchReconciliation.incomplete) warnings.push(`${usage.searchReconciliation.incomplete} search receipt(s) have both legacy and incomplete or conflicting attempt records; totals may overlap until the evidence is resolved`);
   if (usage.attributionConflicts) warnings.push(`${usage.attributionConflicts} conflicting origin receipts; that work is counted once as unattributed`);
   usage.sessions.forEach(s => { s.path = slash(relative(lab, s.file)); });
   const record = researchRecord(lab);
@@ -508,6 +654,18 @@ export function reportData(lab, {publish = false} = {}) {
 }
 
 const compact = n => n == null ? '?' : n >= 1e6 ? `${(n/1e6).toFixed(2)}M` : n >= 1e3 ? `${(n/1e3).toFixed(1)}K` : `${n}`;
+export function usageBreakdown(data) {
+  const groups = new Map();
+  for (const c of data.usage.receipts) {
+    const labels = {mission:c.mission || 'unknown', packRevision:c.packRevision || 'unknown', agent:c.taskId && c.taskId !== 'unknown' ? c.taskId : `${c.role || 'unknown'} ${c.session?.slice(0,8) || ''}`.trim(), workType:c.workType || 'unknown', session:c.session, model:`${c.provider}/${c.model}`, effort:c.effort, kind:c.kind, costKind:c.costKind || 'unknown'};
+    const key=JSON.stringify(labels);
+    if(!groups.has(key))groups.set(key,{...labels,calls:0,sums:{},coverage:{}});
+    const row=groups.get(key);row.calls++;
+    for(const field of ['input','output','cacheRead','cacheWrite','total','cost'])if(c[field]!=null){row.sums[field]=(row.sums[field]||0)+c[field];row.coverage[field]=(row.coverage[field]||0)+1;}
+  }
+  return [...groups.values()];
+}
+
 export function renderReport(data, {from = '.research/local'} = {}) {
   const u = data.usage, g = data.git, c = data.collective;
   const byLab = c.labs.flatMap(lab => lab.models.map(r => ({...r, lab: lab.label})));
@@ -533,7 +691,13 @@ export function renderReport(data, {from = '.research/local'} = {}) {
     `${u.calls} recorded calls across the available lab receipts; ${u.unmetered} lack input/output accounting. ${u.sessions.length} conversations are retained on this machine.`, '',
     '`?` means unknown; `*` is a partial sum. Reasoning is part of output, never added again. Effort is the recorded setting, not a comparison of model capability.', '',
     'Totals combine local records with receipts received through sync. Other labs may have newer work that has not arrived yet. Unattributed work counts once without guessing its lab; “not shared” means missing accounting, not zero effort. Counts describe activity, not research quality.', '');
+  if (u.searchReconciliation?.reconciled) lines.push(`${u.searchReconciliation.reconciled} legacy search observation(s) reconciled with their complete attempt receipts; historical files are retained.`, '');
   for (const row of u.rows.filter(r => r.coverage.cost)) lines.push(`- ${clean(row.provider)}/${clean(row.model)} (${clean(row.effort)}, ${clean(row.kind)}): $${row.sums.cost.toFixed(4)} ${row.costKind}; cost available for ${row.coverage.cost}/${row.calls} calls.`);
+  lines.push('', '## Missions and agents', '', '| Mission / revision | Agent | Model | Effort | Work / lens | Calls | Input | Output | Cache read / write | Cost |', '| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |');
+  for (const r of usageBreakdown(data)) {
+    const value = k => !r.coverage[k] ? '?' : compact(r.sums[k]) + (r.coverage[k] < r.calls ? '*' : '');
+    lines.push(`| ${clean(r.mission)} / ${clean(r.packRevision.slice(0,12))} | ${clean(r.agent)} | ${clean(r.model)} | ${clean(r.effort)} | ${clean(r.kind)} / ${clean(r.workType)} | ${r.calls} | ${value('input')} | ${value('output')} | ${value('cacheRead')} / ${value('cacheWrite')} | ${r.coverage.cost ? '$'+r.sums.cost.toFixed(4)+' '+r.costKind+' ('+r.coverage.cost+'/'+r.calls+')' : '?'} |`);
+  }
   lines.push('', '## Recent commits', '', ...g.recent.map(c => `- ${c.commit} · ${clean(c.time)} · ${clean(c.subject)}`), '', '## Frequently changed paths', '',
     ...g.paths.map(([p,n]) => `- ${clean(p)} · touched in ${n} of the last 20 commits`), '', '## Tools / local transcripts', '',
     ...Object.entries(u.tools).sort((a,b) => b[1]-a[1]).map(([name,n]) => `- ${clean(name)}: ${n}`), '', '## Findings', '',
@@ -548,7 +712,34 @@ export function refreshReport(lab, force = false) {
   if (!historyEnabled(lab) || (!force && Date.now() - (refreshed.get(lab) ?? 0) < 300000)) return;
   const data = reportData(lab, {publish: true});
   atomic(join(localDir(lab), 'ACTIVITY.md'), renderReport(data));
+  writeActivity(lab, data, {local: true});
   refreshed.set(lab, Date.now());
+}
+
+export function writeActivity(lab, data, {local = false} = {}) {
+  // Build only from the same sanitized receipts another clone can read. This
+  // excludes native IDs, transcript links, Git subjects, and local diagnostics.
+  const shared = readShared(lab), usage = aggregate([], [], shared.calls, shared.turns);
+  // Committed views use only shared inputs, never this clone's label, logs or clock.
+  // Capture controls affect new receipts, not rebuilding already shared history.
+  if (!local && !shared.snapshots.length && !shared.warnings.length) return;
+  const sharedData = local ? data : {usage, collective: collective(lab, usage, shared, null, false)};
+  const root = join(lab, local ? '.research/local/activity' : '.research/activity');
+  const write = (name, body) => {
+    const file = join(root, name);
+    if (!regular(file) || readFileSync(file, 'utf8') !== body) atomic(file, body);
+  };
+  const overview = activityView(sharedData);
+  const warnings = [...shared.warnings];
+  if (usage.searchReconciliation.incomplete) warnings.push(`${usage.searchReconciliation.incomplete} search receipt(s) have incomplete or conflicting attempt records; totals may overlap`);
+  const gaps = warnings.length ? '\n## Entries needing attention\n\n' + warnings.map(w => `- ${clean(w)}`).join('\n') + '\n' : '';
+  write('README.md', activityMarkdown(overview, {overall: true}) + gaps);
+  write('overview.svg', activityChart(overview));
+  for (const lab of overview.labs) {
+    const view = activityView(sharedData, lab.id), name = activityFile(lab.id);
+    write(`labs/${name}.md`, activityMarkdown(view, {chart: `${name}.svg`}) + gaps);
+    write(`labs/${name}.svg`, activityChart(view));
+  }
 }
 
 // Automatic scans and Git work run on another event loop. Only one report per
@@ -677,6 +868,7 @@ export async function archive(lab, destination, {include = [], includeCaches = f
     emit('conversations/INDEX.md', index.join('\n') + '\n');
     // Include the exact standalone verifier used to create the archive.
     emit('history.mjs', readFileSync(fileURLToPath(import.meta.url)));
+    emit('activity.mjs', readFileSync(new URL('./activity.mjs', import.meta.url)));
     emit('README.md', `# ${clean(basename(lab))} archive\n\nSaved ${new Date().toISOString()}. This is a private snapshot, not the small publication pack.\n\n- [Activity](ACTIVITY.md)\n- [Conversations](conversations/INDEX.md)\n- [Manifest](manifest.json): hashes, omitted paths, symlinks, repositories, and extra inputs.\n- workspace/: files as copied, including uncommitted and ignored work.\n- repositories/: Git bundles plus staged and unstaged binary patches. Bundles include refs and reachable commits, not reflogs or unreachable objects.\n\nVerify with \`node history.mjs verify .\`. To compress after inspection, run \`tar -czf ../lab-archive.tar.gz .\` from this directory.\n\nRestore each repository by cloning its bundle into a fresh directory, checking out its recorded HEAD, and overlaying the corresponding workspace files (including deletions shown by status.txt). To restore staging, apply staged.patch with \`git apply --cached\`; the workspace copy already contains both staged and unstaged changes. Symlinks are listed in the manifest and need to be recreated deliberately.\n\nPi native JSONL copies are in conversations/. DSH snapshots preserve headers and events for inspection or a version-aware importer; they are not DSH's on-disk database format. Resuming depends on a compatible runtime and tools. Running processes, credentials from outside the lab, and provider state are not captured.\n\nInline attachments and workspace files travel with the archive. External file references need an explicit --include when making it; references inside arbitrary tool output are not automatically followed. Capture at a quiet moment for a consistent snapshot. Files changing during capture are flagged where detected; this is not an atomic filesystem snapshot.\n\nFull transcripts and ignored files may contain private material. Review a separate copy before publishing.\n`);
     manifest.finished = new Date().toISOString();
     const endHead = git(lab, ['rev-parse', 'HEAD']);
@@ -721,8 +913,8 @@ async function main(args) {
   if (command === 'report') {
     if (rest.some(a => !['--json', '--write'].includes(a))) throw new Error('report accepts --json or --write');
     const data = reportData(lab, {publish: rest.includes('--write') && historyEnabled(lab)});
-    if (rest.includes('--write')) { const file = join(localDir(lab), 'ACTIVITY.md'); atomic(file, renderReport(data)); console.log(file); }
-    else console.log(rest.includes('--json') ? JSON.stringify(data, null, 2) : renderReport(data));
+    if (rest.includes('--write')) { const file = join(localDir(lab), 'ACTIVITY.md'); atomic(file, renderReport(data)); writeActivity(lab, data); console.log(file); }
+    else console.log(rest.includes('--json') ? JSON.stringify({...data, activity: activityView(data)}, null, 2) : renderReport(data));
     return;
   }
   if (command === 'archive') {
@@ -737,6 +929,10 @@ async function main(args) {
   throw new Error('Usage: node history.mjs collect | report [--write|--json] | archive DIR [--include PATH] [--include-caches] | verify DIR');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+function isCommand() {
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
+  catch { return false; }
+}
+if (isCommand()) {
   main(process.argv.slice(2)).catch(e => { console.error(`history: ${e.message}`); process.exitCode = 1; });
 }

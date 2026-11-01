@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { reportData } from './history.mjs'
+import questions from './questions.cjs'
 
 const pi = process.argv[2] || 'pi'
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -27,6 +28,13 @@ const retrySource = join(pkg, 'src', 'retry.mjs');
 writeFileSync(retrySource, readFileSync(retrySource, 'utf8').replace('initialDelayMs: 30_000', 'initialDelayMs: 100'));
 for (const dir of [home, join(lab, '.research'), notLab]) mkdirSync(dir, { recursive: true })
 writeFileSync(join(lab, '.research', 'LAB.md'), '# lab\n')
+// A pre-manifest lab must not mix its untouched old history helper with new sync.
+try {
+  const old = execFileSync('git', ['show', '71afe0189510f8d7dcdc585ff42b769a62b0bcba:src/history.mjs'], {cwd: repo, stdio: ['ignore', 'pipe', 'pipe']})
+  mkdirSync(join(lab, '.research/tools'), {recursive: true})
+  writeFileSync(join(lab, '.research/tools/history.mjs'), old)
+} catch { /* Source-only archives have no historical Git fixture. */ }
+
 const hooks = join(scratch, 'worker-hooks.jsonl')
 mkdirSync(join(home, 'extensions'))
 writeFileSync(join(home, 'extensions', 'guard.ts'), `
@@ -53,6 +61,12 @@ export default function(pi) {
   for (const event of ['session_start', 'session_shutdown']) pi.on(event, (_event, ctx) => {
     const id = worker(ctx);
     if (id) appendFileSync(${JSON.stringify(hooks)}, JSON.stringify({event, id}) + '\\n');
+  });
+  pi.on('before_provider_request', (event, ctx) => {
+    if (ctx.model?.id !== 'claude-cache') return;
+    const payload=structuredClone(event.payload), system=payload.messages.find(m=>m.role==='system');
+    if(system && typeof system.content==='string')system.content=[system.content,'','','',''].map(text=>({type:'text',text,cache_control:{type:'ephemeral'}}));
+    return payload;
   });
   pi.on('tool_call', (event, ctx) => {
     if (worker(ctx) && event.toolName === 'read' && event.input.path === 'blocked.txt')
@@ -94,7 +108,7 @@ const server = createServer((req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r))
 writeFileSync(join(home, 'models.json'), JSON.stringify({ providers: { probe: {
   baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'probe',
-  models: [{ id: 'probe', contextWindow: 200000, maxTokens: 4096 },
+  models: [{id:'claude-cache',contextWindow:200000,maxTokens:4096}, { id: 'probe', contextWindow: 200000, maxTokens: 4096 },
     {id: 'reasoner', reasoning: true, contextWindow: 200000, maxTokens: 4096}] },
   alternate: {baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'alternate-fixture',
     models: [{id: 'scout', reasoning: false, contextWindow: 32000, maxTokens: 4096},
@@ -102,7 +116,7 @@ writeFileSync(join(home, 'models.json'), JSON.stringify({ providers: { probe: {
   unavailable: {baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
     models: [{id: 'locked', contextWindow: 32000, maxTokens: 4096}]}
 } }))
-const env = { ...process.env, OPENROUTER_API_KEY: '', PI_CODING_AGENT_DIR: home, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' }
+const env = { ...process.env, PE_PACK_ROOT: '', PE_PACK_CACHE: join(scratch,'cache'), OPENROUTER_API_KEY: '', PI_CODING_AGENT_DIR: home, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' }
 
 const run = (args, cwd) => new Promise((resolve, reject) => {
   const child = spawn(pi, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -124,7 +138,7 @@ function parse(request) {
     tools: (request.tools ?? []).map(t => t.function.name) }
 }
 
-const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_archive_agents', 'pe_interrupt_agent', 'pe_list_models', 'pe_web_search'].sort()
+const peTools = ['pe_subagent', 'pe_send_message', 'pe_list_agents', 'pe_archive_agents', 'pe_interrupt_agent', 'pe_list_models', 'pe_web_search', 'pe_question'].sort()
 const goalTools = ['create_goal', 'get_goal', 'update_goal']
 // The goal a scripted model last read with get_goal, so it can name the exact revision.
 const lastGoal = request => {
@@ -214,8 +228,9 @@ const packer = readFileSync(join(src, 'pack.mjs'), 'utf8').trimEnd() + '\n'
 const history = readFileSync(join(src, 'history.mjs'), 'utf8').trimEnd() + '\n'
 const status = readFileSync(join(src, 'status-report.mjs'), 'utf8').trimEnd() + '\n'
 const ledger = readFileSync(join(src, 'ledger.mjs'), 'utf8').trimEnd() + '\n'
-const research = readFileSync(join(src, 'research.md'), 'utf8').trim()
-const missionText = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8').trimEnd() + '\n']))
+const skillDir = name => existsSync(join(pkg,'packs/blue/skills',name+'.md')) ? join(pkg,'packs/blue/skills') : join(pkg,'packs/common/skills');
+const research = readFileSync(join(pkg, 'packs/common/research.md'), 'utf8').trim()
+const missionText = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(pkg,'packs',({'red-team':'red','blue-team':'blue','math-team':'math',signals:'signals'})[mode],'mission.md'), 'utf8').trimEnd() + '\n']))
 const expand = text => Object.entries(missionText).reduce((t, [mode, m]) => t.replace(`{{mission:${mode}}}`, m), text)
   .replace('{{pe_research}}', research)
   .replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', createHash('sha256').update(code).digest('hex'))
@@ -241,15 +256,15 @@ const sample = (text, n, path) => {
 // A note may keep its own extension, as a script to copy (hn-collect.mjs).
 const noteName = (kind, t) => kind === 'note' && t.endsWith('.mjs') ? t : t + '.md'
 const tables = (name, text) => text.replace(/\{\{(table|sample|note):([a-z0-9][a-z0-9.-]*?)(?::([1-9][0-9]*))?\}\}/g, (_, kind, t, n) => {
-  const file = readFileSync(join(src, 'skills', name, noteName(kind, t)), 'utf8')
+  const file = readFileSync(join(skillDir(name), name, noteName(kind, t)), 'utf8')
   return kind === 'table' ? file.trim() : kind === 'note' ? `\`notes/${noteName(kind, t)}\`` : sample(file, Number(n ?? 3), `notes/${t}.md`)
 })
-const want = Object.fromEntries(readdirSync(join(src, 'skills')).filter(f => f.endsWith('.md')).map(f => {
-  const text = expand(tables(f.slice(0, -3), readFileSync(join(src, 'skills', f), 'utf8')))
+const want = Object.fromEntries([...new Set(['common','blue'].flatMap(g => readdirSync(join(pkg,'packs',g,'skills')).filter(f=>f.endsWith('.md'))))].map(f => {
+  const text = expand(tables(f.slice(0, -3), readFileSync(join(skillDir(f.slice(0,-3)), f), 'utf8')))
   return [text.match(/^name: (.*)$/m)[1], { description: text.match(/^description: (.*)$/m)[1], body: body(text) }]
 }))
-const personaTemplate = expand(readFileSync(join(src, 'persona.md'), 'utf8').trim())
-const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(src, 'missions', mode + '.md'), 'utf8')]))
+const personaTemplate = expand(readFileSync(join(pkg, 'packs/common/persona.md'), 'utf8').trim())
+const missions = Object.fromEntries(['red-team', 'blue-team', 'math-team', 'signals'].map(mode => [mode, readFileSync(join(pkg,'packs',({'red-team':'red','blue-team':'blue','math-team':'math',signals:'signals'})[mode],'mission.md'), 'utf8')]))
 const withMission = mission => personaTemplate.replace('{{pe_mission}}', () => mission)
 const persona = withMission(missions['blue-team'])
 const listed = system => [...system.matchAll(/<skill>\s*<name>(.*?)<\/name>\s*<description>([\s\S]*?)<\/description>\s*<location>(.*?)<\/location>/g)]
@@ -263,6 +278,109 @@ let failed
 try {
   await run(['install', pkg], scratch)
   check(JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8')).packages?.length === 1, 'pi install accepts the pushed files as a package')
+
+  {
+    const syncLab = join(scratch, 'sharing-context');
+    mkdirSync(join(syncLab, '.research/local'), {recursive: true});
+    writeFileSync(join(syncLab, '.research/LAB.md'), '# Sharing fixture\nSync: off\n');
+    writeFileSync(join(syncLab, 'fixture.txt'), 'A source to read.');
+    const status = (state, noticeId = state) => writeFileSync(join(syncLab, '.research/local/sync.json'),
+      JSON.stringify({state, noticeId, conflicts:['PEER_CONFLICT.md'], advice:['CITATION_ADVICE'], at: new Date().toISOString()}));
+    status('waiting');
+    const defaultsFile = join(pkg, 'src/pack-defaults.json'), defaultsText = readFileSync(defaultsFile, 'utf8');
+    const defaults = JSON.parse(defaultsText); defaults.digests.common = '0'.repeat(64);
+    writeFileSync(defaultsFile, JSON.stringify(defaults));
+    const seen = []; let step = 0;
+    answer = async request => {
+      seen.push(JSON.stringify(request.messages));
+      if (step++ === 0) { status('needs-merge'); return tool('read', {path: 'fixture.txt'}); }
+      if (step === 2) return tool('read', {path: 'fixture.txt'});
+      return 'Done.';
+    };
+    const s = goalSession(syncLab);
+    try {
+      await s.prompt('Read the fixture.');
+      check(seen.length === 3 && seen.every(text => (text.match(/PE sharing status:/g) || []).length === 1 && !text.includes('PEER_CONFLICT')),
+        'sync: Pi delivers one transcript notice; a mid-tool-loop change waits for the next turn');
+      await s.prompt('Continue independent research.');
+      await s.prompt('Continue again.');
+      const notices = (await s.branch()).filter(e => e.type === 'custom_message' && e.customType === 'pe-sync');
+      check(notices.length === 2 && JSON.stringify(notices[1]).includes('PEER_CONFLICT'),
+        'sync: a changed state arrives once at the next ordinary turn');
+      check(seen.every(text => !text.includes('CITATION_ADVICE') && !text.includes("engine's build-time library")),
+        'sync: advice and ordinary content provenance stay out of model requests');
+      const before = seen.length;
+      await s.rpc({type:'prompt', message:'/pe-version'});
+      await until(() => notified(s, 'CITATION_ADVICE') && notified(s, "engine's build-time library"));
+      status('waiting', 'new-wait');
+      await new Promise(r => setTimeout(r, 250));
+      check(seen.length === before, 'sync: status inspection and a changed state never wake an idle Pi manager');
+      status('synced'); // It was adopted before the next turn; no stale queued reminder.
+      await s.prompt('Work continues.');
+      check((await s.branch()).filter(e => e.type === 'custom_message' && e.customType === 'pe-sync').length === 2,
+        'sync: resolved state is not delivered later');
+      status('needs-merge');
+    } finally { await s.close(); }
+    try {
+      const fresh = await ask(syncLab, 'A fresh session.');
+      check(!seen.at(-1).includes('PE sharing status:') && !fresh.system.includes("engine's build-time library"),
+        'sync: delivery receipts survive a fresh Pi process and compatible provenance never enters the persona');
+      const g = goalSession(syncLab);
+      try {
+        status('synced');
+        let round = 0;
+        const before = requests.length;
+        answer = async () => {
+          if (round++ === 0) return tool('create_goal', {objective:'Inspect the disposable fixture.',max_goal_rounds:2});
+          status('waiting','goal-wait');
+          return 'Research continues.';
+        };
+        await g.prompt('Keep investigating the fixture for two goal rounds.');
+        const entries = await g.branch(), state = await g.snapshot();
+        check(state.roundsStarted === 2 && requests.length === before + 4 &&
+          entries.filter(e => e.type === 'custom_message' && e.customType === 'pe-goal-round').length === 2 &&
+          entries.filter(e => e.type === 'custom_message' && e.customType === 'pe-sync').length === 1,
+          'sync: a notice joins an existing goal continuation without replacing its entries or spending an extra round');
+      } finally {await g.close();}
+    } finally { writeFileSync(defaultsFile, defaultsText); }
+    answer = async () => 'ok';
+  }
+
+  {
+    const reviewLab = join(scratch, 'guidance-lab');
+    const library = join(scratch, 'guidance-library');
+    cpSync(join(pkg, 'packs'), join(library, 'packs'), {recursive: true});
+    const git = (...args) => execFileSync('git', ['-C', library, ...args], {encoding:'utf8', stdio:['ignore','pipe','pipe']});
+    git('init', '-b', 'main');git('config', 'user.name', 'Fixture');git('config', 'user.email', 'fixture@example.invalid');
+    git('add', '.');git('commit', '-m', 'Initial library');
+    const defaultsFile = join(pkg, 'src/pack-defaults.json'), defaultsText = readFileSync(defaultsFile, 'utf8');
+    // The package still contains the original packs. Only its default repository
+    // is redirected to this disposable source for independent library updates.
+    writeFileSync(defaultsFile, JSON.stringify({...JSON.parse(defaultsText), repository: library}));
+    mkdirSync(join(reviewLab, '.research'), {recursive: true});
+    writeFileSync(join(reviewLab, '.research/LAB.md'), '# Existing lab\n');
+    try {
+      const first = await ask(reviewLab, 'Continue the investigation.');
+      check(first.system.includes('has no acknowledged review in this clone'), 'guidance: an older lab receives an opening review notice');
+      const cli = join(reviewLab, '.research/tools/content.cjs');
+      execFileSync(process.execPath, [cli, 'review', '--acknowledge'], {cwd: reviewLab, env});
+      const next = await ask(reviewLab, 'Continue the investigation.');
+      check(next.system.includes('No opening review announcement is needed.'), 'guidance: an acknowledged comparison survives a new Pi process');
+      const file = join(library, 'packs/common/skills/fleet.md'), before = readFileSync(file, 'utf8');
+      writeFileSync(file, before + '\nA changed lab convention.\n');
+      git('add', '.');git('commit', '-m', 'Publish changed guidance');
+      const lockFile = join(reviewLab, '.research/packs.lock.json'), lock = readFileSync(lockFile, 'utf8');
+      const preview = execFileSync(process.execPath, [cli, 'update', '--preview'], {cwd: reviewLab, env, encoding:'utf8'});
+      check(preview.includes('+A changed lab convention.') && readFileSync(lockFile, 'utf8') === lock,
+        'guidance: copied CLI previews remote guidance without adopting it');
+      const pinned = await ask(reviewLab, 'Continue the investigation.');
+      check(pinned.system.includes('No opening review announcement is needed.'), 'guidance: preview does not silently change active guidance');
+      execFileSync(process.execPath, [cli, 'update', '--apply'], {cwd: reviewLab, env});
+      const updated = await ask(reviewLab, 'Continue the investigation.');
+      check(updated.system.includes('changed since this clone') && updated.system.includes('Changed: common/skills/fleet.md.'),
+        'guidance: the next assembly names a relevant change');
+    } finally { writeFileSync(defaultsFile, defaultsText); }
+  }
 
   {
     const s = goalSession(notLab);
@@ -329,6 +447,14 @@ try {
     answer = async () => 'ok';
   }
 
+  {
+    let sent=false;const outgoing=[];
+    answer=async request=>{if(request.model==='claude-cache'){outgoing.push(request);return 'Cache fixture finished.';}return !sent?(sent=true,tool('pe_subagent',{taskId:'T-89',task:'CACHE_BOUNDARY_FIXTURE: inspect the source.',provider:'probe',model:'claude-cache'})):'Done.';};
+    await ask(lab,'Run the cache compatibility fixture.');
+    const markers=x=>!x||typeof x!=='object'?0:(x.cache_control?1:0)+Object.entries(x).filter(([k])=>k!=='cache_control').reduce((n,[,v])=>n+(Array.isArray(v)?v.reduce((a,b)=>a+markers(b),0):markers(v)),0);
+    check(outgoing.length>0 && outgoing.every(r=>markers(r)===1),'cache: real Pi worker sends one stable instruction boundary after a bridge fixture adds five markers');
+    answer=async()=> 'ok';
+  }
   const inside = await ask(lab, 'hello')
   check(inside.system.includes(persona), 'lab: the persona is in the system prompt')
   check(inside.system.includes('## In Pi'), 'lab: the Pi note is in the system prompt')
@@ -347,10 +473,10 @@ try {
   ok('lab: every skill file matches src/skills')
   // Field notes sit beside the skill that names them, byte for byte, to read on demand.
   for (const s of skills) {
-    const named = [...readFileSync(join(src, 'skills', s.name.replace(/^pe-/, '') + '.md'), 'utf8').matchAll(/\{\{(sample|note):([a-z0-9][a-z0-9.-]*?)(?::[0-9]+)?\}\}/g)].map(m => noteName(m[1], m[2]))
+    const named = [...readFileSync(join(skillDir(s.name.replace(/^pe-/, '')), s.name.replace(/^pe-/, '') + '.md'), 'utf8').matchAll(/\{\{(sample|note):([a-z0-9][a-z0-9.-]*?)(?::[0-9]+)?\}\}/g)].map(m => noteName(m[1], m[2]))
     for (const t of named) {
       const note = join(dirname(s.location), 'notes', t)
-      if (!existsSync(note) || readFileSync(note, 'utf8') !== readFileSync(join(src, 'skills', s.name.replace(/^pe-/, ''), t), 'utf8').trimEnd() + '\n')
+      if (!existsSync(note) || readFileSync(note, 'utf8') !== readFileSync(join(skillDir(s.name.replace(/^pe-/, '')), s.name.replace(/^pe-/, ''), t), 'utf8').trimEnd() + '\n')
         throw new Error(`${s.name}: notes/${t} is missing or differs from src/skills`)
     }
   }
@@ -367,11 +493,34 @@ try {
       !existsSync(join(historyLab, '.research/local/sessions')) && existsSync(join(historyLab, '.research/local/index')),
       'history: Pi indexes its native manager transcript and finishes its background shutdown report without a duplicate copy')
     check(data.usage.unmetered === 1, 'history: a provider without usage is shown as unmetered')
+    check(data.usage.turns.some(t => t.ended >= t.started) && existsSync(join(historyLab, '.research/local/activity/overview.svg')) &&
+      !existsSync(join(historyLab, '.research/activity/overview.svg')),
+      'history: real Pi records run boundaries and refreshes local charts without rewriting shared views')
     check(data.collective.labs.some(row => row.local && row.calls === 1) && existsSync(join(historyLab, '.research/activity')),
       'history: new manager work has a stable origin and shareable usage receipts')
     writeFileSync(join(historyLab, '.research/LAB.md'), '# lab\nHistory: off\n')
     await run(['-p', '--provider', 'probe', '--model', 'probe', 'Leave this session out.'], historyLab)
     check(reportData(historyLab).usage.sessions.length === 1, 'history: History off stops automatic capture')
+  }
+
+  // Answers are durable input, delivered once on a real session's next turn.
+  {
+    const q=questions.submit(lab,{question:'May I expand the experiment?',proposedDefault:'Wait for permission'});
+    const s=goalSession(lab);
+    try {
+      await s.prompt('Read the current question and continue independent work.');
+      check(!(await s.branch()).some(e=>e.customType==='pe-answer'), 'questions: a proposed default is never delivered as approval');
+      questions.answer(lab,q.id,'Use only the toy fixture.');
+      await s.prompt('Read my answer.');
+      await s.prompt('Continue within that answer.');
+      const delivered=(await s.branch()).filter(e=>e.customType==='pe-answer');
+      check(delivered.length===1 && delivered[0].content.includes('Use only the toy fixture.'), 'questions: an answer reaches real Pi exactly once across subsequent turns');
+    } finally {await s.close();}
+    const fresh=goalSession(lab);
+    try {
+      await fresh.prompt('Begin a fresh session in this lab.');
+      check(!(await fresh.branch()).some(e=>e.customType==='pe-answer'), 'questions: delivered answers stay delivered in a fresh Pi session');
+    } finally {await fresh.close();rmSync(join(lab,'.research/questions'),{recursive:true,force:true});}
   }
 
   // The lab tools must land as the bytes the skill tells the agent to hash. Pi copies
@@ -380,7 +529,7 @@ try {
     const file = join(lab, '.research', 'tools', name)
     return readFileSync(file, 'utf8') === readFileSync(join(repo, 'src', src), 'utf8')
   }
-  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && placedTool('history.mjs', 'history.mjs') && placedTool('status-report.mjs', 'status-report.mjs') && placedTool('ledger.mjs', 'ledger.mjs') && !existsSync(join(notLab, '.research', 'tools')),
+  check(placedTool('lint-notes.mjs', 'lint-notes.mjs') && placedTool('cvss.mjs', 'cvss.mjs') && placedTool('pack.mjs', 'pack.mjs') && placedTool('history.mjs', 'history.mjs') && placedTool('activity.mjs', 'activity.mjs') && placedTool('status-report.mjs', 'status-report.mjs') && placedTool('ledger.mjs', 'ledger.mjs') && !existsSync(join(notLab, '.research', 'tools')),
     'lab: the linter, calculator, and packer are placed in the lab, and nowhere else')
 
   // With no OpenRouter key, search fails with a request to the operator, not silence.
@@ -498,6 +647,16 @@ try {
     check((await ask(nested, 'resume here')).system.includes(withMission(missions['red-team'])), 'mission: a nested working directory inherits the lab mission')
   }
 
+  {
+    const mismatch = join(scratch,'mismatched-lab');mkdirSync(join(mismatch,'.research'),{recursive:true});
+    writeFileSync(join(mismatch,'.research/LAB.md'),'# Lab\n');
+    writeFileSync(join(mismatch,'.research/MISSION.md'),missions.signals);
+    writeFileSync(join(mismatch,'.research/packs.json'),JSON.stringify({mission:'math'}));
+    const response = await ask(mismatch,'Read the mission.');
+    check(response.system.includes('MISSION.md selects signals, but packs.json selects math'), 'mission: the manager receives an explicit catalog disagreement warning');
+    check(readFileSync(join(mismatch,'.research/MISSION.md'),'utf8')===missions.signals, 'mission: a selection warning never rewrites operator text');
+  }
+
   // Operator additions, including replacement metacharacters and a distant final
   // instruction, must reach the manager and a fresh reporter intact.
   for (const [n, mode] of ['red-team', 'blue-team', 'math-team', 'signals'].entries()) {
@@ -516,11 +675,11 @@ try {
     }
     await ask(lab, 'Delegate the report. PRIVATE_PARENT_HISTORY')
     check(managerRequests.every(r => parse(r).system.includes(withMission(complete))), `${mode}: the manager inherits every operator addition verbatim`)
-    check(reporterRequests.length > 0 && reporterRequests.every(r => parse(r).system.includes(complete) && parse(r).system.includes(want['pe-reporter'].body) &&
+    check(reporterRequests.length > 0 && reporterRequests.every(r => parse(r).system.includes(complete) && parse(r).system.includes(body(readFileSync(join(pkg,'packs', ['red-team','blue-team'].includes(mode)?({'red-team':'red','blue-team':'blue'})[mode]:'common','skills/reporter.md'),'utf8')).split('{{')[0].trim()) &&
       !JSON.stringify(r.messages).includes('PRIVATE_PARENT_HISTORY')), `${mode}: a fresh reporter receives the entire mission and its reporting skill`,
       reporterRequests.length ? undefined : JSON.stringify(managerRequests.at(-1)?.messages.slice(-2)))
     const guide = mode === 'math-team' ? 'pe-math' : mode === 'blue-team' ? 'pe-patch' : mode === 'signals' ? 'pe-hunt' : undefined
-    if (guide) check(reporterRequests.every(r => parse(r).system.includes(want[guide].body)), `${mode}: reporter inherits the mission's artifact guidance`)
+    if (guide) check(reporterRequests.every(r => parse(r).system.includes('# '+(mode==='math-team'?'Math':mode==='signals'?'Hunt':'Patch'))), `${mode}: reporter inherits the mission's artifact guidance`)
     if (mode === 'math-team') check(reporterRequests.every(r => /pe-math's notes\/ folder: \S+pe-math\/notes/.test(parse(r).system)), 'math-team: a worker given pe-math knows where its field notes are')
     answer = async () => 'ok'
   }
@@ -1018,6 +1177,7 @@ try {
       if (done === 1) return tool('bash', {command: 'node .research/scratch/T-7/probe.mjs'})
       if (done === 2) return tool('fixture_probe', {})
       if (done === 3) return tool('pe_web_search', {query: 'Fixture primary research'})
+      if (done === 4) return tool('pe_question', {question: 'May I use the larger fixture?', affected: 'T-7 expansion', proposedDefault: 'Continue with the toy fixture'})
       return 'T-7: computed 42, checked the installed helper, and found a primary source.'
     }
     return stage++ === 0 ? tool('pe_subagent', {taskId: 'T-7', task: 'Test an idea and look for prior work.'}) : 'Researcher launched.'
@@ -1031,6 +1191,10 @@ try {
     'workers: a general researcher writes and executes code, uses an installed helper, and searches the web')
   check(receiptName && JSON.parse(readFileSync(scratchFile('T-7', receiptName), 'utf8')).sources[0].url === 'https://example.test/paper' &&
     !existsSync(join(lab, '.research', 'intel')), 'workers: search receipts stay with their artifacts for manager review')
+  const workerQuestion = questions.list(lab).find(q => q.task === 'T-7');
+  check(workerQuestion?.question === 'May I use the larger fixture?' && workerQuestion.status === 'open' &&
+    existsSync(scratchFile('T-7', 'questions/' + workerQuestion.id + '.json')),
+    'questions: a real worker drafts a question, the manager integrates it, and independent work completes');
   const searches = readFileSync(hooks, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.event === 'search')
   check(searches.length > 0 && searches[0].request.plugins[0].engine === 'parallel' && searches.every(e => e.request.max_tokens === 16 &&
     e.request.model === 'deepseek/deepseek-v4.1-flash-1017' && e.request.reasoning?.enabled === false && e.request.plugins.length === 1 &&
@@ -1166,7 +1330,10 @@ try {
       await until(() => live, () => output)
       await rpc(action === 'reload' ? {type: 'prompt', message: '/pe-test-reload'} : {type: 'switch_session', sessionPath: plainSession})
       check(!existsSync(scratchFile(taskId, '.done')), `workers: ${action} stops an in-flight worker without marking success`)
-      if (action === 'reload') check(existsSync(scratchFile(taskId, '.interrupted')), 'workers: the interrupted marker survives until its notice is delivered')
+      if (action === 'reload') {
+        await rpc({type: 'prompt', message: '/pe-test-reload'})
+        check(existsSync(scratchFile(taskId, '.interrupted')), 'workers: the interrupted marker survives repeated reloads before delivery')
+      }
       const before = requests.length
       await rpc({type: 'prompt', message: 'Hello from the replacement session.'})
       await until(() => requests.length > before, () => output)
@@ -1180,7 +1347,7 @@ try {
         `workers: ${action} leaves interrupted.md with the task and model in the worker's scratch`, note)
       if (action === 'reload') {
         await until(() => !existsSync(scratchFile(taskId, '.interrupted')), () => output)
-        check(messages.includes('PE: Pi stopped while 1 worker(s) ran') && messages.includes(`${taskId}: Investigate until interrupted.`),
+        check(messages.split('PE: Pi stopped while 1 worker(s) ran').length === 2 && messages.includes(`${taskId}: Investigate until interrupted.`),
           'workers: the next lab session hears once which tasks were cut off, and the marker clears after delivery')
       }
       // A plain session cannot report a lab's workers; clear the marker so later lab tests start clean.
@@ -1254,8 +1421,8 @@ try:
         orbiting = len(set(running)) >= 4 and '⣿' in running
         colors = {m for m in re.findall(chr(27) + re.escape('[') + '([0-9;]*)m[⠀-⣿]', output.decode('utf-8', 'replace'))}
         middle_free = any(len(s) == 4 and s[1] == '⣀' and all(s[i] != '⣀' for i in [0, 2, 3]) for s in slots)
-        finished = 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +3 !1' in text and 'goal complete' in text
-        if orbiting and len(colors) >= 5 and middle_free and '· goal active' not in text and finished:
+        finished = 'Persistent Eclipse · ⣀ ⣀ ⣀ ⣀ +3 !1' in text and '⚑ complete' in text
+        if orbiting and len(colors) >= 5 and middle_free and '⚑ active' in text and finished:
             print('ok   workers and goals: real TUI shows braille stacks ramping through the age colors with a traveling gap, stable slots, counts, and only a goal state that needs a look')
             break
     else:
@@ -1505,13 +1672,14 @@ finally:
     const extension = readFileSync(extensionFile, 'utf8')
     const idleMs = 1000
     check(extension.includes('const IDLE_REVIEW_MS = 15 * 60_000;'), 'idle review: production interval is fifteen minutes')
-    writeFileSync(extensionFile, extension.replace('const IDLE_REVIEW_MS = 15 * 60_000;', `const IDLE_REVIEW_MS = ${idleMs};`))
+    const superviseFile=join(pkg,'src/supervision.cjs'), originalSupervision=readFileSync(superviseFile,'utf8');
+    writeFileSync(superviseFile,originalSupervision.replace('300000','1000').replace('900000','2000').replace('1800000','4000'))
     const sleep = ms => new Promise(r => setTimeout(r, ms))
     let sequence = 0
-    async function fixture({workers = 2, slots = 4, goal = true, cap = 8, headless = false, stuck = false, earlyFinish = true, housekeeping = false} = {}) {
+    async function fixture({workers = 2, slots = 4, goal = true, cap = 8, headless = false, stuck = false, earlyFinish = true, housekeeping = false, streaming = false} = {}) {
       const dir = join(scratch, `idle-review-${sequence++}`)
       mkdirSync(join(dir, '.research'), {recursive: true})
-      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: ${slots}\n${housekeeping ? 'Housekeeping: 5s\n' : ''}`)
+      writeFileSync(join(dir, '.research', 'LAB.md'), `# Lab\nWorkers: ${slots}\n${housekeeping ? 'Housekeeping: 5s\nFleet check: off\nProgress check: off\n' : ''}`)
       const release = Array.from({length: workers}, deferred)
       const busy = deferred(), busyStarted = deferred()
       let stage = 0, authorityTried = false, authorityDenied = false, completing = false
@@ -1522,6 +1690,7 @@ finally:
           const seen = JSON.stringify(request.messages)
           if (seen.includes('REVIEW_INTERRUPT')) { nudged.add(id); return 'Wrapped up with what I have.' }
           if (stuck) return tool('bash', {command: 'sleep 30'})
+          if (streaming && !seen.includes('progress-marker')) return tool('bash', {command: 'for i in $(seq 1 100); do echo progress-marker; sleep 0.1; done'})
           if (headless && earlyFinish && workers > 1 && id === 'T-1') await sleep(idleMs / 3)
           else await release[Number(id.slice(2)) - 1].promise
           return 'Worker finished.'
@@ -1568,13 +1737,13 @@ finally:
         close: async () => { await s.close(); release.forEach(r => r.resolve()); busy.resolve() }}
     }
     try {
-      const f = await fixture({cap: 2})
+      const f = await fixture({cap: 2, streaming: true})
       try {
         check((await f.s.snapshot()).roundsStarted === 0, 'idle review: workers initially suppress ordinary goal rounds')
         await until(() => f.reviews.size === 1 && f.authorityDenied())
         const first = [...f.reviews.values()][0].text
         check(first.includes('2/4 slots free') && first.includes('T-1:') && first.includes('T-2:') &&
-          first.includes('last observed activity') && first.includes('keep waiting'),
+          first.includes('last observed activity') && first.includes('wait when'),
           'idle review: two free slots wake the manager with worker context and permission to wait')
         check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
           'idle review: the nudge spends no round and cannot pause with operator authority')
@@ -1593,7 +1762,7 @@ finally:
           'idle review: the operator speaking resets the interval, and waiting doubles the next one')
         await until(() => f.reviews.size === 3)
         check(f.reviews.get(3).at - f.reviews.get(2).at >= 2 * idleMs && f.reviews.get(3).text.includes('next check comes after 4 seconds'),
-          'idle review: checks slow while the manager keeps waiting')
+          'idle review: worker output continues while repeated capacity checks back off')
         check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
           'idle review: waiting through checks never exhausts the goal round cap')
       } finally { await f.close() }
@@ -1602,12 +1771,15 @@ finally:
       const cellsFile = join(pkg, 'src', 'cells.mjs'), young = readFileSync(cellsFile, 'utf8')
       writeFileSync(cellsFile, young.replace('export const AGE_FULL_MS = 100 * 60_000;', 'export const AGE_FULL_MS = 600;'))
       try {
-        const red = await fixture({workers: 3})
+        writeFileSync(superviseFile,readFileSync(superviseFile,'utf8').replace('1200000','400'));
+        const red = await fixture({workers: 3, slots:3})
         try {
-          await until(() => red.reviews.size === 1)
-          const text = [...red.reviews.values()][0].text
-          check(text.includes("while a worker's footer cell is red") && text.includes('1/4 slots free') &&
-            text.includes('Red: T-1, T-2, T-3.') && text.includes('thinking for') && red.nudged.size === 0,
+          // Workers start at different instants. The first check may correctly
+          // identify only the earliest ones; wait until each has crossed the threshold.
+          await until(() => [...red.reviews.values()].some(r => r.text.includes('Progress to inspect: T-1, T-2, T-3.')))
+          const text = [...red.reviews.values()].find(r => r.text.includes('Progress to inspect: T-1, T-2, T-3.')).text
+          check(text.includes('progress needs a look') && text.includes('0/3 slots free') &&
+            text.includes('Progress to inspect: T-1, T-2, T-3.') && text.includes('thinking for') && red.nudged.size === 0,
             'idle review: red workers wake a full fleet at the idle check, each named to look at, none stopped', text)
         } finally { await red.close() }
         const stuck = await fixture({workers: 1, stuck: true})
@@ -1616,14 +1788,14 @@ finally:
           await until(() => stuck.nudged.size === 1)
           check(true, 'workers: explicit interrupt stops a command and continues the worker with the message')
         } finally { await stuck.close() }
-        const headlessRed = await fixture({workers: 3, headless: true, earlyFinish: false})
-        check([...headlessRed.reviews.values()].some(r => r.text.includes('Red: T-')),
+        const headlessRed = await fixture({workers: 3, slots:3, headless: true, earlyFinish: false})
+        check([...headlessRed.reviews.values()].some(r => r.text.includes('Progress to inspect: T-')),
           'idle review: a red worker wakes headless Pi before any worker finishes')
-      } finally { writeFileSync(cellsFile, young) }
+      } finally { writeFileSync(cellsFile, young); writeFileSync(superviseFile,originalSupervision.replace('300000','1000').replace('900000','2000').replace('1800000','4000')); }
       const tidy = await fixture({workers: 3, headless: true, earlyFinish: false, housekeeping: true})
       check([...tidy.reviews.values()].some(r => r.text.includes('<housekeeping>') && r.text.includes('come up for air')),
         'housekeeping: a due check takes the idle moment and wakes headless Pi before any worker finishes')
-      for (const config of [{workers: 3}, {workers: 1, slots: 2}, {goal: false}]) {
+      for (const config of [{workers: 4}, {workers: 2, slots: 2}, {goal: false}]) {
         const f = await fixture(config)
         try {
           await sleep(idleMs + 300)
@@ -1673,7 +1845,7 @@ finally:
         review.at - partial.completions[0] >= idleMs,
         'idle review: headless Pi handles a completion before checking the remaining worker')
     } finally {
-      writeFileSync(extensionFile, extension)
+      writeFileSync(superviseFile,originalSupervision); writeFileSync(extensionFile, extension)
     }
   }
   // Fresh-context reactions at manager settlement, independent of free worker slots.
@@ -1768,7 +1940,7 @@ finally:
     } finally { await shared.close() }
     const inherited = await fixture({reasoner: true, reply: 'WAIT'})
     try {
-      await until(() => inherited.reviews.length === 1)
+      await until(() => inherited.reviews.length === 1, () => JSON.stringify({reviews:inherited.reviews.length,events:inherited.s.events.slice(-8)}))
       check(inherited.reviews[0].model === 'reasoner' && inherited.reviews[0].reasoning_effort === 'low',
         'idle reaction: reviewer inherits the exact manager model and effort')
     } finally { await inherited.close() }
@@ -1846,5 +2018,5 @@ finally:
 } catch (e) { failed = e }
 server.close()
 rmSync(scratch, { recursive: true, force: true })
-if (failed) { console.error('FAIL', failed.message); process.exit(1) }
+if (failed) { console.error('FAIL', failed.stack ?? failed.message); process.exit(1) }
 console.log('PASS')

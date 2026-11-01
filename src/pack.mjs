@@ -20,7 +20,7 @@ const PLAN_FORMAT = "pe-lab-pack-plan/1";
 // Exclude runtime output, not authored helpers or another import's provenance.
 const SKIP_ROOT = new Set(["scratch", "exports", "local"]);
 const SKIP = new Set([".lake", ".git", ".DS_Store"]);
-const SHIPPED = /^tools\/(?:lint-notes|cvss|pack|history)\.mjs(?:\.shipped)?$/;
+const SHIPPED = /^tools\/(?:(?:lint-notes|cvss|pack|history|activity|status-report|ledger|sync|push-check)\.mjs|(?:content|questions|record)\.cjs|pack-defaults\.json)(?:\.shipped)?$/;
 // Suggestions only: size and extension cannot tell us whether bytes are replaceable.
 const BINARY = /\.(pdf|png|jpe?g|gif|webp|svg|zip|gz|tgz|tar|bz2|xz|7z|bin|so|dylib|dll|exe|wasm|mp4|mov|olean)$/i;
 const LARGE = 1024 * 1024;
@@ -88,9 +88,13 @@ function plan(name) {
   const research = researchRoot(), lab = dirname(research), dir = exportDir(research, name);
   const previous = readPlan(dir), choices = new Map(previous.files.map((f) => [f.path, f]));
   const files = walk(research).map((path) => {
-    const bytes = lstatSync(join(research, path)).size;
+    const stat = lstatSync(join(research, path)), bytes = stat.size;
     const { action = "include", origin, summary } = choices.get(path) ?? {};
-    return { path, bytes, action, origin, summary, ...(BINARY.test(path) || bytes > LARGE ? { reference_candidate: true } : {}) };
+    // Planning a reference to a large dataset should not read it into memory.
+    // Small notes get a content comparison; large artifacts use size/mtime here.
+    const observed = bytes <= LARGE ? {sha256: sha256(readFileSync(join(research, path)))} : {modifiedMs: stat.mtimeMs};
+    return { path, bytes, ...observed, action, origin, summary,
+      ...(BINARY.test(path) || bytes > LARGE ? { reference_candidate: true } : {}) };
   });
   const out = join(dir, "plan.json");
   writeFileSync(out, JSON.stringify({ format: PLAN_FORMAT, name, created: previous.created ?? new Date().toISOString(), files }, null, 2) + "\n");
@@ -106,11 +110,18 @@ function build(name) {
   const p = readPlan(dir), choices = new Map(p.files.map((f) => [f.path, f]));
   const problems = [];
   const included = [], referenced = [], omitted = [];
+  const changed = {added: [], modified: [], removed: []}, seen = new Set();
   for (const path of walk(research)) {
+    seen.add(path);
     const f = choices.get(path) ?? { action: "include" };
     if (!safeName(path)) { problems.push(`${path}: unsafe archive path`); continue; }
     const bytes = readFileSync(join(research, path));
     const record = { path, bytes: bytes.length, sha256: sha256(bytes) };
+    if (p.files.length) {
+      if (!choices.has(path)) changed.added.push(path);
+      else if (f.sha256 ? f.sha256 !== record.sha256 : f.bytes !== bytes.length ||
+          (f.modifiedMs != null && f.modifiedMs !== lstatSync(join(research, path)).mtimeMs)) changed.modified.push(path);
+    }
     if (f.action === "reference" && f.origin?.trim() && f.summary?.trim()) {
       referenced.push({ ...record, origin: f.origin, summary: f.summary });
     } else if (f.action === "include" || f.action === "reference") {
@@ -120,6 +131,7 @@ function build(name) {
       omitted.push({ ...record, reason: f.summary || "omitted by export plan" });
     } else problems.push(`${path}: action must be include, reference, or omit`);
   }
+  changed.removed = p.files.filter(f => !seen.has(f.path)).map(f => f.path);
   if (problems.length) fail(`pack: not built\n${problems.map((x) => `- ${x}`).join("\n")}`);
   // A first build needs no plan command. Retain its time so rebuilding stays deterministic.
   if (!p.created) {
@@ -129,7 +141,7 @@ function build(name) {
   const mission = existsSync(join(research, "MISSION.md")) ? readFileSync(join(research, "MISSION.md"), "utf8").match(/^Mode: (.+)$/m)?.[1] ?? null : null;
   const slug = basename(lab).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "") || "lab";
   const manifest = { format: FORMAT, name, created: p.created, lab: slug, commit: git(lab, ["rev-parse", "HEAD"]), mission, sources: sources(lab),
-    included: included.map(({ bytesData, ...f }) => f), referenced, omitted,
+    included: included.map(({ bytesData, ...f }) => f), referenced, omitted, sincePlan: changed,
     counts: { included: included.length, referenced: referenced.length, omitted: omitted.length } };
   const entries = [["manifest.json", Buffer.from(JSON.stringify(manifest, null, 2) + "\n")], ["README.md", readFileSync(join(dir, "README.md"))],
     ...included.map((f) => [`research/${f.path}`, f.bytesData])];
@@ -143,6 +155,8 @@ function build(name) {
   writeFileSync(out, zip);
   console.log(`wrote ${out.slice(lab.length + 1)} (${zip.length} bytes, sha256 ${sha256(zip)})`);
   console.log(`${included.length} included, ${referenced.length} referenced, ${omitted.length} omitted`);
+  for (const [kind, paths] of Object.entries(changed))
+    if (paths.length) console.log(`Since plan, ${kind}:\n${paths.map(p => `  ${p}`).join('\n')}`);
 }
 
 function checkNames(entries) {

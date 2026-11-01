@@ -1,145 +1,103 @@
-import hashlib, json, pathlib, re
+"""Build only runtime wiring. Research content stays in packs/."""
+import json, pathlib, hashlib, subprocess
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-S = ROOT / 'src' / 'skills'
-research = (ROOT / 'src' / 'research.md').read_text().strip()
-persona = (ROOT / 'src' / 'persona.md').read_text().rstrip('\n').replace('{{pe_research}}', research)
-LAB = ['git-research','survey','reader','muse','coderunner','migrator','challenger','intel','cvss','lint','dead-end','reporter','status-report','fleet','patch','math','web','export','sync','layered-challenge','history','models','model-notes','hunt','osint','forecast','judge']
-MISSIONS = ['blue-team', 'red-team', 'math-team', 'signals']
-mission = {m: (ROOT / 'src' / 'missions' / (m + '.md')).read_text().rstrip('\n') + '\n' for m in MISSIONS}
-
-code = (ROOT / 'src' / 'cvss.mjs').read_text().rstrip() + '\n'
-lint = (ROOT / 'src' / 'lint-notes.mjs').read_text().rstrip() + '\n'
-pack = (ROOT / 'src' / 'pack.mjs').read_text().rstrip() + '\n'
-history = (ROOT / 'src' / 'history.mjs').read_text().rstrip() + '\n'
-status = (ROOT / 'src' / 'status-report.mjs').read_text().rstrip() + '\n'
-ledger = (ROOT / 'src' / 'ledger.mjs').read_text().rstrip() + '\n'
-# A skill's tables and field notes live in src/skills/<name>/, one Markdown file each.
-# {{table:<file>}} inlines a file whole. {{sample:<file>}} (or {{sample:<file>:<n>}})
-# inlines its heading and first three (or n) rows, and ships the whole file as
-# notes/<file>.md beside the skill, to read on demand. {{note:<file>}} ships it and names
-# the path. Every slot needs a file and every file a slot.
-SLOT = re.compile(r'\{\{(table|sample|note):([a-z0-9][a-z0-9.-]*?)(?::([1-9][0-9]*))?\}\}')
-ROW = re.compile(r'^(\| |- |\* |[0-9]+\. )')
-def sample(text, n, path):
-    lines, out, rows, seen = text.strip().split('\n'), [], 0, 0
-    table = any(l.startswith('| --- ') or l.startswith('|---') for l in lines)
-    for i, line in enumerate(lines):
-        row = ROW.match(line) and not (table and (line.startswith('| --- ') or (i + 1 < len(lines) and lines[i + 1].startswith('| --- '))))
-        if row:
-            seen += 1
-            if seen <= n: out.append(line)
-        elif not seen: out.append(line)
-    more = seen - min(seen, n)
-    return '\n'.join(out) + (f'\n\n*+{more} more in `{path}`.*' if more else f'\n\n*More in `{path}`.*')
-NOTES = {}
-def tables(name, text):
-    folder, used, notes = S / name, set(), {}
-    def fill(m):
-        kind, file, n = m.group(1), m.group(2), int(m.group(3) or 3)
-        path = folder / (file if kind == 'note' and file.endswith('.mjs') else file + '.md')
-        if not path.is_file(): raise SystemExit(f'{name}: missing {kind} {path}')
-        used.add(path.name)
-        if kind == 'table': return path.read_text().strip()
-        notes[path.name] = path.read_text().rstrip() + '\n'
-        return sample(path.read_text(), n, f'notes/{path.name}') if kind == 'sample' else f'`notes/{path.name}`'
-    text = SLOT.sub(fill, text)
-    unused = sorted(p.name for p in folder.iterdir() if p.suffix in ('.md', '.mjs') and p.name not in used) if folder.is_dir() else []
-    if unused: raise SystemExit(f'{name}: unused tables or notes {", ".join(unused)}')
-    NOTES['pe-' + name if name != 'git-research' else 'pe-git-research'] = notes
-    return text
-
-def skill(name):
-    text = tables(name, S.joinpath(name + '.md').read_text()).replace('{{pe_research}}', research)
-    for m in MISSIONS:
-        text = text.replace('{{mission:' + m + '}}', mission[m])
-    return (text.replace('{{cvss.mjs}}', code).replace('{{cvss.sha256}}', hashlib.sha256(code.encode()).hexdigest())
-                .replace('{{lint.mjs}}', lint).replace('{{lint.sha256}}', hashlib.sha256(lint.encode()).hexdigest())
-                .replace('{{pack.mjs}}', pack).replace('{{pack.sha256}}', hashlib.sha256(pack.encode()).hexdigest())
-                .replace('{{history.mjs}}', history).replace('{{history.sha256}}', hashlib.sha256(history.encode()).hexdigest())
-                .replace('{{status-report.mjs}}', status).replace('{{status-report.sha256}}', hashlib.sha256(status.encode()).hexdigest())
-                .replace('{{ledger.mjs}}', ledger).replace('{{ledger.sha256}}', hashlib.sha256(ledger.encode()).hexdigest()))
-
-def block(text, indent):
-    pad = ' ' * indent
-    return '\n'.join((pad + line).rstrip() for line in text.split('\n'))
-
-def desc(name):
-    text = S.joinpath(name + '.md').read_text()
-    block = text.split('---', 2)[1]
-    for line in block.strip().split('\n'):
-        if line.startswith('description:'):
-            return line.split(':', 1)[1].strip()
-    raise SystemExit('missing description in ' + name)
-
+# Hashes identify this build's default content without putting pack prose into
+# the engine. Compatible library revisions can advance independently of a build.
+digests = json.loads(subprocess.check_output(['node', '-e', "const c=require('./src/content.cjs'); console.log(JSON.stringify(Object.fromEntries(['common','red','blue','math','signals'].map(id=>[id,c.readPack('packs/'+id,id).digest]))))"], cwd=ROOT))
+DEFAULTS = {"format": 1, "repository": "https://github.com/kodareef5/persistent-eclipse.git", "digests": digests}
+(ROOT/'src/pack-defaults.json').write_text(json.dumps(DEFAULTS, indent=2)+'\n')
+CONTENT_KEY = "persistent-eclipse.content." + hashlib.sha256((ROOT/"src/content.cjs").read_bytes()).hexdigest()[:16]
 out = []
 w = out.append
-w('# Persistent Eclipse. Because day breaks.')
-w('')
+def block(text, indent):
+    return '\n'.join((' ' * indent + line).rstrip() for line in text.split('\n'))
+def embedded(name):
+    return "(() => { const module = {exports:{}}; const require = process.getBuiltinModule;\n" + (ROOT/'src'/name).read_text() + ("\nmodule.exports.setDefaults(" + json.dumps(DEFAULTS) + ");" if name == "content.cjs" else "") + "\nreturn module.exports; })()"
+TOOLS = ['lint-notes.mjs','cvss.mjs','pack.mjs','history.mjs','activity.mjs','status-report.mjs','ledger.mjs','content.cjs','questions.cjs','record.cjs','sync.mjs','pack-defaults.json','push-check.mjs']
+w('# Persistent Eclipse. Because day breaks. Content resolves from local or pinned remote packs.')
 w('- insert:')
-# host-level lab-aware provider carrying the library
 w('    - id: pe-skills')
 w("      name: '@deepseek-ai/dsh-skill-filesystem'")
 w('      config:')
 w('        providerName: persistent-eclipse-host')
 w('        includeDefaultRoots: false')
 w('        watch: false')
-w('        # The default mission, for a lab that has not recorded its own MISSION.md.')
-w('        mission: |')
-w(block(mission['blue-team'].rstrip('\n'), 10))
-w('        # Lab task skills, served to any agent working inside a lab.')
-w('        skills:')
-for name in LAB:
-    pe = 'pe-'+name if name!='git-research' else 'pe-git-research'
-    w(f'          {pe}:')
-    w(f'            description: {json.dumps(desc(name))}')
-    w('            content: |')
-    w(block(skill(name).rstrip('\n'), 14))
-    if NOTES.get(pe):
-        w('            # Field notes, written beside the skill and read on demand.')
-        w('            notes:')
-        for file, body in sorted(NOTES[pe].items()):
-            w(f'              {file}: |')
-            w(block(body.rstrip('\n'), 16))
-w('        # Manager-only setup skill, registered in the mode scope by pe-kickoff.')
-w('        kickoff: |')
-w(block(skill('kickoff').rstrip('\n'), 10))
-w('        # Serve the library only when the working directory is inside a lab.')
 w('        customSkillDirs: !!js |')
 prov = r'''(() => {
-  const fs = process.getBuiltinModule('node:fs'), path = process.getBuiltinModule('node:path')
-  const lib = () => [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
-  HISTORY_HOOK
-  RETRY_HOOK
-  SUPERVISE_HOOK
-  const inLab = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return true; if (d === path.dirname(d)) return false } }
-  // A skill's field notes, written once to a folder named by their hash; the skill tool
-  // tells the model to resolve notes/<file>.md against it.
-  const notesBase = (name, s) => {
-    if (!s.notes || !Object.keys(s.notes).length) return {}
-    const os = process.getBuiltinModule('node:os'), crypto = process.getBuiltinModule('node:crypto')
-    const dir = path.join(os.tmpdir(), 'persistent-eclipse-notes-' + crypto.createHash('sha256').update(JSON.stringify(s.notes)).digest('hex').slice(0, 12), name)
-    try {
-      for (const [file, body] of Object.entries(s.notes)) {
-        const target = path.join(dir, 'notes', path.basename(file))
-        if (!fs.existsSync(target)) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, body) }
-      }
-      return { resourceBase: { kind: 'directory', path: dir } }
-    } catch { return {} }
-  }
-  const meta = (name, s) => ({ name, description: s.description, invocation: { modelInvocable: true, userInvocable: true }, provider: 'persistent-eclipse', source: 'runtime', rank: 450, locator: name })
+  const fs = process.getBuiltinModule("node:fs"),
+    path = process.getBuiltinModule("node:path");
+  const contentRuntime = CONTENT_RUNTIME;
+  globalThis[Symbol.for(CONTENT_KEY)] = contentRuntime;
+  const supervision = SUPERVISION_RUNTIME;
+  const questions = QUESTIONS_RUNTIME;
+  const record = RECORD_RUNTIME;
+  const engineTools = ENGINE_TOOLS;
+  const tools = TOOLS_RUNTIME;
+  const resolvedContent = contentRuntime.createResolver({
+    runtime: true,
+    get localRoot() { return [...loader.entries()].find((e) => e.options.id === "pe-skills")?.options.config.packRoot; },
+    get installedRoot() { return globalThis[Symbol.for("persistent-eclipse.packRoot")]; },
+  });
+  const snapshots = new WeakMap();
+  const content = (cwd, session) => {
+    session ||= ctx.get("agents")?.currentInitiator()?.session;
+    if (session?.header.origin === "subagent" && snapshots.has(session))
+      return snapshots.get(session);
+    const value = resolvedContent(cwd || process.cwd());
+    if (session?.header.origin === "subagent") snapshots.set(session, value);
+    return value;
+  };
+  const lib = (cwd) =>
+    Object.fromEntries(
+      content(cwd).entries.map((e) => [e.name, { ...e, content: e.body }]),
+    );
+  const inLab = (cwd) => !!contentRuntime.labRoot(cwd || process.cwd());
+  const place = (cwd) => {
+    const lab = contentRuntime.labRoot(cwd || process.cwd());
+    if (!lab) return;
+    tools.place(lab, engineTools);
+  };
+  const meta = (name, s) => ({
+    name,
+    description: s.description,
+    invocation: { modelInvocable: true, userInvocable: true },
+    provider: "persistent-eclipse",
+    source: "runtime",
+    rank: 450,
+    locator: name,
+  });
   skills.registerProvider(() => ({
-    name: 'persistent-eclipse',
-    list: async o => inLab(o.cwd) ? Object.entries(lib()).map(([n, s]) => meta(n, s)) : [],
-    get: async (c, o) => {
-      const s = inLab(o.cwd) && lib()[c.name]
-      return s ? { ...meta(c.name, s), content: s.content, ...notesBase(c.name, s) } : undefined
+    name: "persistent-eclipse",
+    list: async (o) => {
+      if (!inLab(o.cwd)) return { candidates: [], complete: false };
+      place(o.cwd);
+      return {
+        candidates: Object.entries(lib(o.cwd))
+          .filter(([n]) => n !== "pe-kickoff")
+          .map(([n, s]) => meta(n, s)),
+        complete: true,
+      };
     },
-  }))
-  return []
-})()'''
-w(block(prov.replace('HISTORY_HOOK', (ROOT / 'src' / 'history-dsh.js').read_text())
-            .replace('RETRY_HOOK', (ROOT / 'src' / 'retry-dsh.js').read_text())
-            .replace('SUPERVISE_HOOK', (ROOT / 'src' / 'supervise-dsh.js').read_text()), 14))
+    get: async (c, o) => {
+      if (!inLab(o.cwd)) return;
+      const s = lib(o.cwd)[c.name];
+      return s
+        ? {
+            ...meta(c.name, s),
+            content: s.body,
+            resourceBase: { kind: "directory", path: s.baseDir },
+          }
+        : undefined;
+    },
+  }));
+  HISTORY_HOOK;
+  RETRY_HOOK;
+  SUPERVISE_HOOK;
+  return [];
+})();'''
+prov=prov.replace('CONTENT_KEY',json.dumps(CONTENT_KEY)).replace('CONTENT_RUNTIME',embedded('content.cjs')).replace('SUPERVISION_RUNTIME',embedded('supervision.cjs')).replace('QUESTIONS_RUNTIME',embedded('questions.cjs')).replace('RECORD_RUNTIME',embedded('record.cjs')).replace('TOOLS_RUNTIME',embedded('tools.cjs')).replace('ENGINE_TOOLS',json.dumps({n:(ROOT/'src'/n).read_text() for n in TOOLS}))
+prov=prov.replace('HISTORY_HOOK',(ROOT/'src/history-dsh.js').read_text()).replace('RETRY_HOOK',(ROOT/'src/retry-dsh.js').read_text()).replace('SUPERVISE_HOOK',(ROOT/'src/supervise-dsh.js').read_text())
+w(block(prov,10))
 def preset(preset_id, name, description, order):
     w(f'    - id: preset-{preset_id}')
     w("      name: '@deepseek-ai/dsh-agent-preset'")
@@ -152,9 +110,7 @@ def preset(preset_id, name, description, order):
     w('          - id: persona')
     w("            name: '@deepseek-ai/dsh-persona'")
     w('            config:')
-    w('              prefix: |-')
-    w(block(persona, 16))
-    # preset-scoped kickoff registration, reads the host library's kickoff body
+    w('              prefix: "{{pe_persona}}"')
     w('          - id: pe-kickoff')
     w("            name: '@deepseek-ai/dsh-skill-filesystem'")
     w('            config:')
@@ -163,75 +119,71 @@ def preset(preset_id, name, description, order):
     w('              watch: false')
     w('              customSkillDirs: !!js |')
     kick = r'''(() => {
-      const fs = process.getBuiltinModule('node:fs'), path = process.getBuiltinModule('node:path')
-      const host = () => [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config
-      ctx.effect(() => ctx.get('systemPrompt').variable('pe_mission', o => {
-        if (o.agent) {
-          const cwd = ctx.get('workingDirectory').get(o.agent.session)
-          for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
-            if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) {
-              const file = path.join(d, '.research', 'MISSION.md')
-              if (fs.existsSync(file)) {
-                const mission = fs.readFileSync(file, 'utf8')
-                if (!mission.trim()) throw new Error('Persistent Eclipse MISSION.md is empty')
-                return mission
-              }
-              break
-            }
-            if (d === path.dirname(d)) break
-          }
-        }
-        const mission = host()?.mission
-        if (!mission) throw new Error('Persistent Eclipse default mission is missing')
-        return mission
-      }))
-      const body = host()?.kickoff
-      if (body) skills.register({ name: 'pe-kickoff', description: KICKOFF_DESC, source: 'runtime', content: body })
-      return []
-    })()'''
-    w(block(kick.replace('KICKOFF_DESC', json.dumps(desc('kickoff'))), 18))
-    w('          - id: pe-skills-gate')
-    w("            name: '@deepseek-ai/dsh-skill-filesystem'")
-    w('            config:')
-    w('              providerName: persistent-eclipse-gate-dirs')
-    w('              includeDefaultRoots: false')
-    w('              watch: false')
-    w('              customSkillDirs: !!js |')
-    gate = r'''(() => {
-      const fs = process.getBuiltinModule('node:fs'), path = process.getBuiltinModule('node:path'), crypto = process.getBuiltinModule('node:crypto')
-      const lab = cwd => { for (let d = path.resolve(cwd || '.'); ; d = path.dirname(d)) { if (fs.existsSync(path.join(d, '.research', 'LAB.md'))) return d; if (d === path.dirname(d)) return undefined } }
-      const tools = () => {
-        const skillset = [...loader.entries()].find(e => e.options.id === 'pe-skills')?.options.config.skills ?? {}
-        const pick = (skill, tool) => new RegExp('```js ' + tool + '\\n([\\s\\S]*?)^```', 'm').exec(skillset[skill]?.content ?? '')?.[1]
-        return [['lint-notes.mjs', pick('pe-lint', 'lint-notes.mjs')], ['cvss.mjs', pick('pe-cvss', 'cvss.mjs')], ['pack.mjs', pick('pe-export', 'pack.mjs')], ['history.mjs', pick('pe-history', 'history.mjs')], ['status-report.mjs', pick('pe-status-report', 'status-report.mjs')], ['ledger.mjs', pick('pe-forecast', 'ledger.mjs')]]
-      }
-      const sha = text => crypto.createHash('sha256').update(text).digest('hex')
-      let shipped
-      const place = root => {
-        shipped ??= tools()
-        const dir = path.join(root, '.research', 'tools')
-        for (const [name, body] of shipped) {
-          if (body === undefined) continue
-          const file = path.join(dir, name)
-          try {
-            if (!fs.existsSync(file)) {
-              fs.mkdirSync(dir, { recursive: true })
-              fs.writeFileSync(file, body)
-            } else if (sha(fs.readFileSync(file, 'utf8')) !== sha(body)) {
-              const ref = file + '.shipped' // Never overwrite so the operator can diff
-              if (!fs.existsSync(ref) || sha(fs.readFileSync(ref, 'utf8')) !== sha(body)) fs.writeFileSync(ref, body)
-            }
-          } catch { /* a read-only lab is the operator's call, not a reason to break the catalog */ }
-        }
-      }
-      skills.registerProvider(() => ({
-        name: 'persistent-eclipse-gate',
-        list: async o => { const root = lab(o.cwd); if (root !== undefined) place(root); return { candidates: [], complete: root !== undefined } },
-        get: async () => undefined,
-      }))
-      return []
-    })()'''
-    w(block(gate, 18))
+  const fs = process.getBuiltinModule("node:fs"),
+    path = process.getBuiltinModule("node:path");
+  // The host provider initializes one resolver module for both presets.
+  const runtime = globalThis[Symbol.for(CONTENT_KEY)];
+  if (!runtime) throw new Error("Persistent Eclipse content provider has not initialized");
+  const resolvedContent = runtime.createResolver({
+    runtime: true,
+    get localRoot() { return [...loader.entries()].find((e) => e.options.id === "pe-skills")?.options.config.packRoot; },
+    get installedRoot() { return globalThis[Symbol.for("persistent-eclipse.packRoot")]; },
+  });
+  const content = (cwd) => resolvedContent(cwd || process.cwd());
+  const cwd = (o) =>
+    o.agent ? ctx.get("workingDirectory").get(o.agent.session) : process.cwd();
+  const mission = (o) => {
+    const dir = cwd(o),
+      root = runtime.labRoot(dir),
+      file = root && path.join(root, ".research/MISSION.md");
+    if (file && fs.existsSync(file)) {
+      const text = fs.readFileSync(file, "utf8");
+      if (!text.trim())
+        throw new Error("Persistent Eclipse MISSION.md is empty");
+      return text;
+    }
+    return content(dir).defaultMission;
+  };
+  ctx.effect(() => ctx.get("systemPrompt").variable("pe_mission", mission));
+  ctx.effect(() =>
+    ctx
+      .get("systemPrompt")
+      .variable("pe_persona", (o) =>
+        content(cwd(o)).persona.replace("{{pe_mission}}", () => mission(o)) +
+        (o.agent?.session.header.origin === "subagent" ? "" : "\n\n" + runtime.conventionStatus(cwd(o), content(cwd(o))).text) + "\n" + content(cwd(o)).warnings.join("\n"),
+      ),
+  );
+  skills.registerProvider(() => ({
+    name: "persistent-eclipse-kickoff-content",
+    list: async () => [
+      {
+        name: "pe-kickoff",
+        description: "Set up or continue a research lab.",
+        invocation: { modelInvocable: true, userInvocable: true },
+        provider: "persistent-eclipse-kickoff-content",
+        source: "runtime",
+        rank: 450,
+        locator: "pe-kickoff",
+      },
+    ],
+    get: async (c, o) => {
+      if (c.name !== "pe-kickoff") return;
+      const s = content(o.cwd).entries.find((s) => s.name === "pe-kickoff");
+      return {
+        ...s,
+        provider: "persistent-eclipse-kickoff-content",
+        source: "runtime",
+        rank: 450,
+        locator: "pe-kickoff",
+        invocation: { modelInvocable: true, userInvocable: true },
+        content: s.body,
+        resourceBase: { kind: "directory", path: s.baseDir },
+      };
+    },
+  }));
+  return [];
+})();'''
+    w(block(kick.replace('CONTENT_KEY',json.dumps(CONTENT_KEY)),18))
     # tools
     tools = [
      ("agent-instructions","'@deepseek-ai/dsh-agent-instructions'", ['config:', '  maxBytes: 65536']),
@@ -282,13 +234,12 @@ def preset(preset_id, name, description, order):
     w('                  agentPreset: standard')
     w('                  modelSelectionSettings: true')
 
-preset('persistent-eclipse', 'Persistent Eclipse',
-       'A persistent research lab. Blue Team by default; Red Team, Math Team, or a Signal Hunt desk when the operator asks.', 10)
-(ROOT / 'cordis.patch.yml').write_text('\n'.join(out) + '\n')
+preset('persistent-eclipse','Persistent Eclipse','A persistent research lab. Select a mission and keep looking.',10)
+(ROOT/'cordis.patch.yml').write_text('\n'.join(out)+'\n')
 # DSH web's browser half: src/dsh-client.js with src/cells.mjs inlined, wrapped in DSH's module loader.
 cells = '\n'.join(l[7:] if l.startswith('export ') else l for l in (ROOT / 'src' / 'cells.mjs').read_text().splitlines() if not l.startswith('//'))
 client = (ROOT / 'src' / 'dsh-client.js').read_text().replace('CELLS\n', cells.strip() + '\n')
-(ROOT / 'dsh-client.js').write_text('// Generated from src/dsh-client.js and src/cells.mjs by src/build.py. Do not edit.\n'
+(ROOT / 'src' / 'dsh-client.bundle.js').write_text('// Generated from src/dsh-client.js and src/cells.mjs by src/build.py. Do not edit.\n'
   'window.__ModuleLoader__.load({\n  id: "persistent-eclipse",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;\n'
   '    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });\n'
   + '\n'.join(('    ' + l).rstrip() for l in client.rstrip().split('\n')) + '\n    return module.exports;\n  }\n});\n')
