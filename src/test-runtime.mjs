@@ -25,3 +25,35 @@ test('worker question drafts are integrated once without replacing an operator a
  assert.equal(questions.list(root)[0].task,'T-1');questions.answer(root,q.id,'Stay with the small case.');questions.integrateDrafts(root);
  assert.equal(questions.list(root).length,1);assert.equal(questions.list(root)[0].answer,'Stay with the small case.');
 });
+
+test('question inbox reads, cancels and answers without invoking an agent', async t => {
+  const {questionInbox} = await import('./questions-ui.mjs');
+  const root=mkdtempSync(join(tmpdir(),'pe-inbox-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const q=questions.submit(root,{question:'May I expand?\nSecond line',affected:'The larger experiment',proposedDefault:'Use all resources',task:'T-1'});
+  const views=[], notices=[];let selections=0, edits=0, refreshed=0;
+  const ui={
+    async select(title, options) {
+      views.push(title);
+      selections++;
+      if(selections===1 || selections===3)return options[0];
+      if(selections===2 || selections===4)return 'Answer';
+      return 'Close';
+    },
+    async editor(title,prefill) {assert.equal(prefill,'');edits++;return edits===1 ? undefined : 'Only the small case.\nKeep the source unchanged.';},
+    notify(message){notices.push(message);},
+  };
+  await questionInbox(root,ui,()=>refreshed++);
+  assert.ok(views.some(v=>v.includes('Second line')&&v.includes('Affected work: The larger experiment')));
+  assert.ok(views.some(v=>v.includes('Suggested default (not approval)')));
+  assert.equal(refreshed,1);assert.equal(questions.list(root)[0].answer,'Only the small case.\nKeep the source unchanged.');
+  assert.ok(notices.at(-1).includes('next turn'));
+  assert.equal(questions.pending(root).length,1,'saving does not prematurely acknowledge delivery');
+  let prefilled;
+  let step=0;
+  await questionInbox(root,{
+    async select(_title, options){return [options.find(x=>x.startsWith('Answered questions')),options[0],'Edit answer','Close'][step++];},
+    async editor(_title,value){prefilled=value;return '   ';}, notify(){},
+  });
+  assert.equal(prefilled,questions.list(root)[0].answer);
+  assert.equal(questions.list(root)[0].answer,'Only the small case.\nKeep the source unchanged.');
+});

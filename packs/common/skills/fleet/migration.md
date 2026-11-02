@@ -14,9 +14,13 @@ The changes worth comparing:
 - **Reports:** a short line can still go in FEEDBACK.md. A larger contribution can
   be a small Markdown file under `updates/`. REPORT.md collects those contributions
   and links existing reports. Keep useful old records and replace duplicate
-  reporting instructions by meaning; no wholesale conversion is needed.
+  reporting instructions by meaning; no wholesale conversion is needed. Retire old
+  instructions to manually render and commit pages after every merge: sync does
+  that. Keep STATUS current and link older snapshots from an archive when useful;
+  do not turn migration into rewriting the historical record.
 - **Sharing:** approved background sync combines committed research and builds
-  the shared pages without changing the checkout or index. At a useful pause,
+  the shared pages. Clean generated-only changes fast-forward quietly; research
+  and local drafts stay untouched. At a useful pause,
   `node .research/tools/sync.mjs` adopts incoming work. `Auto sync: off` leaves
   publication to that command. Real research conflicts stay with the manager;
   generated pages can be rebuilt. Keep the operator's existing sharing policy.

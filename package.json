@@ -1,6 +1,6 @@
 {
   "name": "persistent-eclipse",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "A persistent Git-native research lab for DeepSeek Harness and Pi: Red Team, Blue Team, Math Team, Signals, and session goals.",
   "type": "module",

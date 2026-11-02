@@ -306,20 +306,29 @@ async function run(root, force, background) {
         return syncStatus(root);
       }
     }
-    // Publishing a prepared commit needs no checkout mutation. The manager's
-    // explicit command adopts it through ordinary fast-forward checks at a time
-    // they choose. Background timers and UI reads cannot replace files beneath
-    // a running command, change a mission mid-turn, or touch the manager's index.
+    // Research adoption stays explicit. A clean generated-only fast-forward is
+    // safe between background syncs and keeps our next contribution linear.
     if ((await git(root, ["rev-parse", "HEAD"])) !== head ||
         (await git(root, ["branch", "--show-current"])) !== branch)
       throw new Error("The lab changed during sync; retry after the current Git operation.");
     if (!background && result !== head) await git(root, ["merge", "--ff-only", "--no-edit", result]);
     if (result !== incoming) await git(root, ["push", remote, `${result}:refs/heads/${branch}`]);
-    // Report commits can be newer than this checkout without carrying any
-    // research to adopt. Keep publishing their views, quietly, until the manager
-    // chooses to fast-forward. Raw activity receipts are research, not views.
-    const changes = background && result !== head
-      ? (await git(root, ["diff", "--name-only", "-z", head, result])).split("\0").filter(Boolean) : [];
+    let changes = background && result !== head
+      ? (await git(root, ["diff", "--no-renames", "--name-only", "-z", head, result])).split("\0").filter(Boolean) : [];
+    if (changes.length && changes.every(generated)) {
+      const staged = await git(root, ["diff", "--cached", "--name-only"]);
+      const dirty = (await git(root, ["diff", "--name-only", "-z"])).split("\0").filter(Boolean);
+      if (!staged && !dirty.some(p => changes.includes(p)) &&
+          (await git(root, ["rev-parse", "HEAD"])) === head &&
+          (await git(root, ["branch", "--show-current"])) === branch) {
+        try {
+          // Git protects untracked files and concurrent edits too. Never stash,
+          // reset, or overwrite a draft just to adopt disposable views.
+          await git(root, ["merge", "--ff-only", "--no-edit", "--no-autostash", result]);
+          changes = [];
+        } catch { /* Publication succeeded; leave view adoption for a quiet pause. */ }
+      }
+    }
     const waiting = changes.some(p => !generated(p));
     save(root, { state: waiting ? "waiting" : "synced", ahead: 0,
       behind: waiting ? Number(await git(root, ["rev-list", "--count", `${head}..${result}`])) : 0,

@@ -2,6 +2,7 @@
 // LAB.md enables lab tools, workers, and goals; elsewhere only /pe is available.
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import { row, tint, age, ageNote, AGE_INSPECT, STEP_MS, IDLE_MS } from "./src/ce
 import contentRuntime from "./src/content.cjs";
 import supervision from "./src/supervision.cjs";
 import questions from "./src/questions.cjs";
+import { questionInbox } from "./src/questions-ui.mjs";
 import record from "./src/record.cjs";
 import tools from "./src/tools.cjs";
 import { normalizeCacheControl, cacheLimitedRoute } from "./src/cache-control.mjs";
@@ -63,7 +65,8 @@ Load a skill by reading its file.
   for the operator (pe-status-report).
 - When you finish a reply during an armed goal while workers run, a fresh-context
   reviewer may offer one short, mission-aware reaction. It uses your model and effort,
-  has no tools, and can agree that waiting is appropriate. If you've moved on, it
+  reads the lab for a few minutes without changing anything, takes no worker slot,
+  and can agree that waiting is appropriate. If you've moved on, it
   arrives after your current tool call. Treat it as advice, not an operator instruction. Reviews are at least fifteen minutes apart; \`Idle review: off\`
   in LAB.md disables them.
 - Between worker results, keep the lab moving in short stretches you can drop when a
@@ -84,8 +87,11 @@ const DEFAULT_ROUNDS = 256;
 const BLOCKED_AFTER = 3;
 const IDLE_REVIEW_MS = 15 * 60_000;
 const IDLE_REACTION_MS = 15 * 60_000;
-// Room for the reviewer's reasoning; the reaction itself stays short.
-const REACTION_TOKENS = 16_000;
+// The idle reviewer reads the lab for itself. A few reads and a few minutes make a
+// useful glance; past either, further reads are declined so it answers, and a
+// review still running at the hard limit is dropped.
+const REVIEW_READS = 12, REVIEW_SOFT_MS = 6 * 60_000, REVIEW_HARD_MS = 10 * 60_000;
+const REVIEW_TOOLS = ["read", "grep", "find", "ls"];
 // Each check the manager waits through doubles the next interval, up to four times.
 const idleDelay = (waited: number, text = "") => supervision.delay(text, waited);
 const GOAL_POLICY = `create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed. When a human asks to continue or resume a disarmed, paused, or blocked goal, in any wording or language, use update_goal action resume. Mark complete only when the objective is actually achieved. Mark blocked only after the same blocking condition persists for at least ${BLOCKED_AFTER} consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.`;
@@ -349,11 +355,14 @@ export default function (pi: ExtensionAPI) {
 			try { notes.latest = /^# (.+)$/m.exec(readFileSync(join(lab, file), "utf8"))?.[1].trim() ?? ""; } catch { /* moved since */ }
 		});
 	}
-	let news: { start: number; tapes: string[][] } | undefined;
+	let news: { start: number; tapes: { chars: string[]; question: boolean }[] } | undefined;
 	let newsTimer: ReturnType<typeof setTimeout> | undefined, newsFrame: ReturnType<typeof setInterval> | undefined;
-	function headlines(): string[] {
+	function headlines(): { text: string; question: boolean }[] {
 		const lab = disk.lab, lines: string[] = [];
-		if (!lab) return lines;
+		if (!lab) return [];
+		const openQuestions = questions.list(lab).filter(q => q.status === "open").length;
+		const questionNotice = `${openQuestions} question${openQuestions === 1 ? "" : "s"} waiting · /pe-questions`;
+		if (openQuestions) lines.push(questionNotice);
 		try {
 			const team = /^# Mission:[ \t]*(.+)$/m.exec(readFileSync(join(lab, ".research", "MISSION.md"), "utf8"))?.[1].trim();
 			if (team) lines.push(team);
@@ -372,23 +381,25 @@ export default function (pi: ExtensionAPI) {
 		// Code points, so a headline never splits a character; long ones end in an ellipsis.
 		return lines.map((line) => {
 			const chars = [...line.replace(/\s+/g, " ")];
-			return chars.length > NEWS_MAX ? `${chars.slice(0, NEWS_MAX - 1).join("").trimEnd()}…` : chars.join("");
+			return { text: chars.length > NEWS_MAX ? `${chars.slice(0, NEWS_MAX - 1).join("").trimEnd()}…` : chars.join(""), question: line === questionNotice };
 		});
 	}
-	function nameArea(now: number): string {
-		if (!news) return NAME;
+	function nameArea(now: number): { text: string; question: boolean } {
+		const resting = { text: NAME, question: false };
+		if (!news) return resting;
 		let t = now - news.start;
 		for (const tape of news.tapes) {
-			const scroll = (tape.length - NAME.length) * NEWS_STEP;
+			const scroll = (tape.chars.length - NAME.length) * NEWS_STEP;
 			if (t < scroll) {
 				const at = Math.floor(t / NEWS_STEP);
 				// Pi collapses and trims ASCII spaces in status text; no-break spaces keep the width.
-				return tape.slice(at, at + NAME.length).join("").replace(/ /g, "\u00a0");
+				if (tape.question && !questions.list(disk.lab).some(q => q.status === "open")) return resting;
+				return { text: tape.chars.slice(at, at + NAME.length).join("").replace(/ /g, "\u00a0"), question: tape.question };
 			}
 			t -= scroll + NEWS_PAUSE;
-			if (t < 0) return NAME;
+			if (t < 0) return resting;
 		}
-		return NAME;
+		return resting;
 	}
 	function stopNews() {
 		if (newsTimer) clearTimeout(newsTimer);
@@ -402,12 +413,12 @@ export default function (pi: ExtensionAPI) {
 			if (!ui) return;
 			if (!busy && Date.now() - idleNews < NEWS_IDLE_REST) { scheduleNews(NEWS_REST); return; }
 			if (!busy) idleNews = Date.now();
-			const tapes = headlines().map((line) => [...NAME, ...NEWS_GAP, ...line, ...NEWS_GAP, ...NAME]);
+			const tapes = headlines().map((line) => ({ chars: [...NAME, ...NEWS_GAP, ...line.text, ...NEWS_GAP, ...NAME], question: line.question }));
 			if (!tapes.length) { scheduleNews(NEWS_REST); return; }
 			news = { start: Date.now(), tapes };
 			newsFrame = setInterval(refresh, NEWS_STEP);
 			newsFrame.unref?.();
-			const length = tapes.reduce((n, tape) => n + (tape.length - NAME.length) * NEWS_STEP + NEWS_PAUSE, 0);
+			const length = tapes.reduce((n, tape) => n + (tape.chars.length - NAME.length) * NEWS_STEP + NEWS_PAUSE, 0);
 			newsTimer = setTimeout(() => { scheduleNews(NEWS_REST); refresh(); }, length);
 			newsTimer.unref?.();
 		}, delay);
@@ -547,8 +558,10 @@ export default function (pi: ExtensionAPI) {
 		if (idleReview) clearTimeout(idleReview);
 		idleReview = undefined;
 	}
-	// One fresh, tool-free opinion at settlement. A durable cooldown prevents a
-	// reaction -> reply -> reaction loop, including across reloads and resumes.
+	// A fresh reviewer at settlement. It starts from its own context and reads the lab
+	// with read-only tools, so it can check evidence rather than react to a summary.
+	// A durable cooldown prevents a reaction -> reply -> reaction loop, including
+	// across reloads and resumes.
 	function startIdleReaction(ctx: ExtensionContext) {
 		const lab = labRoot(ctx.cwd), model = ctx.model;
 		const eligible = () => armed && goal?.phase === "active" && running().length > 0
@@ -567,67 +580,92 @@ export default function (pi: ExtensionAPI) {
 		reactionAbort = controller;
 		pi.appendEntry("pe-idle-review", { replyId: last.id, provider: model.provider, model: model.id });
 		reactionWork = (async () => {
-			const timer = setTimeout(() => controller.abort(), 90_000);
+			const timer = setTimeout(() => controller.abort(), REVIEW_HARD_MS);
 			timer.unref?.();
-			let receipt: SessionManager | undefined;
+			let session: AgentSession | undefined;
 			try {
 				// A shared lab keeps this clone's queue, fleet, and cadence under labs/<pe.lab>/.
-				// Name the file read, and leave out what is missing rather than guess.
+				// Point at the files that exist rather than guess; the reviewer reads them itself.
 				const own = localConfig(lab).get("pe.lab");
-				const read = (name: string, limit?: number) => {
-					const file = [own && join("labs", own, name), name].filter((f): f is string => !!f)
-						.find((f) => existsSync(join(lab, ".research", f)));
-					if (!file) return undefined;
-					const text = readFileSync(join(lab, ".research", file), "utf8");
-					return { file: `.research/${file}`, text: limit && text.length > limit ? `${text.slice(0, limit)}\n[excerpt]` : text };
-				};
-				const snapshot = JSON.stringify({ at: new Date().toISOString(), mission: mission(ctx.cwd),
-					scope: read("SCOPE.md")?.text, lab: labFile(lab), labName: own ?? null, objective: goal!.objective,
-					manager: { provider: model.provider, model: model.id, effort: ctx.thinkingLevel ?? "default" },
-					latestReply: reply.slice(0, 8000), workers: running().map(j => ({ id: j.id,
-						brief: j.task.slice(0, 1000), age: elapsed(j.started), activity: j.activity, activityAge: elapsed(j.since) })),
-					status: read("STATUS.md", 3000), queue: read("QUEUE.md", 2000), fleet: read("FLEET.md", 1500),
-					cadence: read("CADENCE.md", 2000), environment: read("ENV.md", 1500), latestNote: notes.latest || null,
-					cachedDisk: disk.text || "unknown",
-					remote: { name: remote.name || null, cachedCommitsBehind: remote.name ? remote.behind : null,
-						lastFetchAttempt: remote.fetched ? new Date(remote.fetched).toISOString() : null },
-					recentReactions: branch.filter(e => e.type === "custom_message" && e.customType === "pe-idle-reaction")
-						.slice(-3).map(e => e.type === "custom_message" ? e.content : "") });
-				// Keep the mission and limits intact; skip an oversized review instead of
-				// silently cutting them. This is a glance at the lab, not a second manager.
-				if (snapshot.length + idleReviewPrompt.length > Math.min(48_000, model.contextWindow)) {
-					ctx.ui.notify("PE idle review skipped: the lab snapshot is too large.", "warning");
-					return;
-				}
+				const where = (name: string) => [own && join("labs", own, name), name].filter((f): f is string => !!f)
+					.find((f) => existsSync(join(lab, ".research", f)));
+				const records = ["STATUS.md", "QUEUE.md", "FLEET.md", "CADENCE.md", "ENV.md"].map(where)
+					.filter((f): f is string => !!f).map(f => `.research/${f}`);
+				let commits = "";
+				try { commits = execFileSync("git", ["-C", lab, "log", "-8", "--format=%h %cr %s"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+				catch { /* A lab without commits has no history to show. */ }
+				const reactions = branch.filter(e => e.type === "custom_message" && e.customType === "pe-idle-reaction")
+					.slice(-3).map(e => e.type === "custom_message" ? String(e.content) : "");
+				const brief = ["<idle_review>",
+					`Objective: ${goal!.objective}`,
+					`Lab: ${lab}${own ? `. This clone is ${own}; its own records are under .research/labs/${own}/.` : ""}`,
+					"Start with .research/MISSION.md, .research/SCOPE.md, and .research/LAB.md.",
+					records.length ? `Current records: ${records.join(", ")}` : "",
+					notes.latest ? `Latest note: ${notes.latest}` : "",
+					commits ? `Recent commits:\n${commits}` : "",
+					`Running workers. Each has its scratch, and its transcript under session/, in .research/scratch/<id>/:\n${running().map(j =>
+						`- ${j.id}: ${elapsed(j.started)}; ${j.activity} for ${elapsed(j.since)}; brief: ${j.task.slice(0, 1000)}`).join("\n")}`,
+					`Disk: ${disk.text || "unknown"}. Remote: ${remote.name ? `${remote.name}, ${remote.behind} commits behind at the last fetch` : "none"}.`,
+					reactions.length ? `Your recent reactions:\n${reactions.map(r => `- ${r}`).join("\n")}` : "",
+					`The manager's latest reply:\n${reply.slice(0, 8000)}`,
+					"</idle_review>"].filter(Boolean).join("\n\n");
 				const local = join(lab, ".research/local");
 				mkdirSync(local, { recursive: true });
 				if (!existsSync(join(local, ".gitignore"))) writeFileSync(join(local, ".gitignore"), "*\n", { flag: "wx" });
-				receipt = SessionManager.create(ctx.cwd, join(local, "idle-reviews"));
-				receipt.appendModelChange(model.provider, model.id);
-				receipt.appendThinkingLevelChange(ctx.thinkingLevel ?? "default");
-				receipt.appendCustomEntry("pe-idle-review", { systemPrompt: idleReviewPrompt, parentSession: ctx.sessionManager.getSessionId() });
-				const message = { role: "user" as const, content: snapshot, timestamp: Date.now() };
-				receipt.appendMessage(message);
-				indexSession(lab, receipt.getHeader(), receipt.getSessionFile(), { ...historyMeta, ...content(lab).meta, role: "idle-review", observedFrom: 0 });
-				const response = await ctx.modelRegistry.streamSimple(model, { systemPrompt: idleReviewPrompt, messages: [message], tools: [] },
-					{ reasoning: ctx.thinkingLevel, maxTokens: Math.min(model.maxTokens || REACTION_TOKENS, REACTION_TOKENS), signal: controller.signal, sessionId: receipt.getSessionId() }).result();
-				receipt.appendMessage(response);
-				const text = response.content.filter(c => c.type === "text").map(c => c.text).join(" ").replace(/\s+/g, " ").trim();
+				const started = Date.now();
+				let reads = 0;
+				const loader = new DefaultResourceLoader({
+					cwd: lab, agentDir: getAgentDir(), noSkills: true, noPromptTemplates: true,
+					extensionFactories: [reviewer => {
+						reviewer.on("before_provider_request", event => cacheLimitedRoute(model) ? normalizeCacheControl(event.payload) : undefined);
+						// The reviewer only reads. Past its budget, a declined read asks for the answer.
+						reviewer.on("tool_call", event => !REVIEW_TOOLS.includes(event.toolName)
+							? { block: true, reason: `The idle reviewer reads only (${REVIEW_TOOLS.join(", ")}).` }
+							: ++reads > REVIEW_READS || Date.now() - started > REVIEW_SOFT_MS
+								? { block: true, reason: "That's enough reading for this review. Answer the manager now from what you've read, or reply WAIT." }
+								: undefined);
+					}],
+					systemPromptOverride: () => idleReviewPrompt, appendSystemPromptOverride: () => [],
+					// Retain other installed hooks, but never load PE's manager into the reviewer.
+					extensionsOverride: (base) => ({ ...base, extensions: base.extensions.filter((e) => !e.tools.has("pe_subagent")) }),
+				});
+				await loader.reload();
+				if (controller.signal.aborted) return;
+				({ session } = await createAgentSession({ cwd: lab, model, thinkingLevel: ctx.thinkingLevel, resourceLoader: loader,
+					tools: REVIEW_TOOLS, sessionManager: SessionManager.create(lab, join(local, "idle-reviews")) }));
+				const reviewer = session;
+				controller.signal.addEventListener("abort", () => { void reviewer.abort().catch(() => {}); }, { once: true });
+				reviewer.sessionManager.appendCustomEntry("pe-idle-review", { parentSession: ctx.sessionManager.getSessionId() });
+				const keep = () => indexSession(lab, reviewer.sessionManager.getHeader(), reviewer.sessionManager.getSessionFile(),
+					{ ...historyMeta, ...content(lab).meta, role: "idle-review", observedFrom: 0 });
+				keep();
+				if (!controller.signal.aborted) {
+					await reviewer.prompt(brief, { expandPromptTemplates: false });
+					await reviewer.waitForIdle();
+				}
+				keep();
+				const response = reviewer.messages.findLast(m => m.role === "assistant");
+				const text = (reviewer.getLastAssistantText() ?? "").replace(/\s+/g, " ").trim();
 				if (controller.signal.aborted || owner !== generation || goal?.id !== goalId || goal?.revision !== revision || !armed || goal.phase !== "active") return;
-				// Reasoning counts against the output limit, so a cut-off review says why it was dropped.
-				const skip = response.stopReason !== "stop" ? `stopped: ${response.stopReason}` : !text || /^WAIT\W*$/i.test(text) ? ""
-					: [...text].length > 600 ? "too long" : branch.some(e => e.type === "custom_message" && e.customType === "pe-idle-reaction" && e.content === text) ? "repeat" : undefined;
-				if (skip !== undefined) { if (skip) receipt.appendCustomEntry("pe-idle-review-skip", { reason: skip }); return; }
+				// A cut-off or failed review says why it was dropped; nothing retries it.
+				const skip = response?.role !== "assistant" ? "no response" : response.stopReason !== "stop" ? `stopped: ${response.stopReason}`
+					: !text || /^WAIT\W*$/i.test(text) ? "" : [...text].length > 600 ? "too long"
+					: branch.some(e => e.type === "custom_message" && e.customType === "pe-idle-reaction" && e.content === text) ? "repeat" : undefined;
+				if (skip !== undefined) { if (skip) reviewer.sessionManager.appendCustomEntry("pe-idle-review-skip", { reason: skip }); return; }
 				// A busy manager reads it after its current tool call; an idle one gets a turn.
 				if (ctx.isIdle() || wakeManager) human = false;
 				pi.sendMessage({ customType: "pe-idle-reaction", content: text, display: true }, { triggerTurn: true, deliverAs: "steer" });
 				wakeManager?.();
 			} catch (error) {
-				receipt?.appendCustomEntry("pe-idle-review-error", { error: String(error) });
+				session?.sessionManager.appendCustomEntry("pe-idle-review-error", { error: String(error) });
 				if (!controller.signal.aborted && owner === generation) ctx.ui.notify("PE idle review unavailable; the lab keeps working.", "warning");
 			} finally {
 				clearTimeout(timer);
-				if (receipt) void scheduleReport(lab).catch(error => historyError(ctx, error));
+				if (session) {
+					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => {});
+					session.dispose();
+					void scheduleReport(lab).catch(error => historyError(ctx, error));
+				}
 			}
 		})().catch(error => historyError(ctx, error)).finally(() => { reactionWork = undefined; reactionAbort = undefined; });
 	}
@@ -691,7 +729,8 @@ Give available researchers distinct questions worth pursuing. Inspect missing pr
 			}).join(" ");
 			const done = [...jobs.values()].filter((j) => j.status === "completed").length;
 			const failed = [...jobs.values()].filter((j) => j.status === "failed").length;
-			const parts = [theme.fg("muted", nameArea(now)),
+			const headline = nameArea(now);
+			const parts = [theme.fg(headline.question ? "warning" : "muted", headline.text),
 				`${cells} ${theme.fg(done ? "success" : "dim", `+${done}`)}${failed ? ` ${theme.fg("error", `!${failed}`)}` : ""}`];
 			// A goal running as armed is the quiet default, and its objective is news.
 			if (goal) {
@@ -1493,11 +1532,12 @@ who writes the shared record.`;
 		},
 	});
 	pi.registerCommand("pe-questions", {
-		description: "List operator questions, or answer: /pe-questions Q-id answer",
+		description: "Open the questions inbox; optionally answer with Q-id and text",
 		handler: async (args, ctx) => {
 			const lab = requireLab(ctx), [id, ...words] = args.trim().split(/\s+/);
-			if (id) questions.answer(lab, id, words.join(" "));
-			ctx.ui.notify(JSON.stringify(questions.list(lab), null, 2), "info");
+			if (!id) return questionInbox(lab, ctx.ui, refresh);
+			questions.answer(lab, id, words.join(" "));
+			ctx.ui.notify("Answer saved for the manager’s next turn.", "info");
 			refresh();
 		},
 	});

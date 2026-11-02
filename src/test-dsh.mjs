@@ -241,9 +241,15 @@ try {
     try { return git(remote, 'show', 'main:.research/REPORT.md').includes('# Research report') }
     catch { return false }
   })
-  if (git(missionLab, 'rev-parse', 'HEAD') !== liveHead) throw new Error('Background DSH sharing moved the live checkout');
   await until('sync: DSH treats its own generated views as synced', () =>
     JSON.parse(readFileSync(join(missionLab, '.research/local/sync.json'), 'utf8')).state === 'synced');
+  const adopted = git(missionLab, 'diff', '--no-renames', '--name-only', liveHead, 'HEAD').split('\n').filter(Boolean);
+  if (!adopted.length || adopted.some(p => p !== '.research/REPORT.md' &&
+      !/^\.research\/activity\/(?:README\.md|overview\.svg|labs\/[^/]+\.(?:md|svg))$/.test(p)))
+    throw new Error('Background DSH sharing must adopt only generated views');
+  if (readFileSync(join(missionLab, '.research/MISSION.md'), 'utf8') !== customMission)
+    throw new Error('Background DSH sharing changed the mission');
+
   if (read(manager)?.mission?.persona?.includes('Shared research is ready')) throw new Error('Sync status leaked into the system prompt');
   const persona = read(manager).mission.persona;
   execFileSync(process.execPath, [join(missionLab, '.research/tools/sync.mjs')], {cwd: missionLab, stdio: 'pipe'});

@@ -179,9 +179,10 @@ test('a lone lab publishes successive reports without waiting, notices, or idle 
     await scheduleSync(lab, {force: true});
     const state = syncStatus(lab), published = git(remote, 'rev-parse', 'main');
     assert.equal(state.state, 'synced'); assert.equal(state.behind, 0);
-    assert.equal(state.viewsPending, true); assert.equal(state.notice, '');
+    assert.equal(state.viewsPending, false); assert.equal(state.notice, '');
     assert.equal(pendingSyncNotice(lab), null);
-    assert.equal(git(lab, 'rev-parse', 'HEAD'), head);
+    assert.equal(git(lab, 'rev-parse', 'HEAD'), published);
+    assert.equal(git(remote, 'rev-list', '--merges', 'main'), '', 'generated views do not create merge churn');
     assert.match(git(remote, 'show', 'main:.research/REPORT.md'), new RegExp(name + ' observation'));
     assert.equal(Number(git(remote, 'rev-list', '--count', 'main')), count + 2,
       'one contribution plus one prepared report/merge commit, with no additional merge');
@@ -195,6 +196,30 @@ test('a lone lab publishes successive reports without waiting, notices, or idle 
   await scheduleSync(lab, {force: true, background: false});
   assert.equal(git(lab, 'rev-parse', 'HEAD'), git(remote, 'rev-parse', 'main'));
   assert.equal(syncStatus(lab).viewsPending, false);
+});
+
+test('background view adoption preserves drafts and waits for staged or edited views', async t => {
+  for (const mode of ['unrelated', 'staged', 'view', 'tracked-view']) {
+    const {lab, remote} = setup(t);
+    if (mode === 'tracked-view') {
+      put(lab, 'REPORT.md', 'Earlier report');
+      git(lab, 'add', '.research/REPORT.md'); git(lab, 'commit', '-m', 'Earlier view');
+    }
+    put(lab, 'updates/new.md', '## New observation\n');
+    git(lab, 'add', '.research'); git(lab, 'commit', '-m', 'Research');
+    const head = git(lab, 'rev-parse', 'HEAD');
+    put(lab, 'MISSION.md', 'Operator draft');
+    if (mode === 'staged') git(lab, 'add', '.research/MISSION.md');
+    if (mode.includes('view')) put(lab, 'REPORT.md', 'Manual report draft');
+    const staged = git(lab, 'diff', '--cached', '--binary');
+    await scheduleSync(lab, {force: true});
+    assert.equal(syncStatus(lab).state, 'synced');
+    assert.equal(readFileSync(join(lab, '.research/MISSION.md'), 'utf8'), 'Operator draft');
+    assert.equal(git(lab, 'diff', '--cached', '--binary'), staged);
+    assert.equal(git(lab, 'rev-parse', 'HEAD'), mode === 'unrelated' ? git(remote, 'rev-parse', 'main') : head);
+    assert.equal(syncStatus(lab).viewsPending, mode !== 'unrelated');
+    if (mode.includes('view')) assert.equal(readFileSync(join(lab, '.research/REPORT.md'), 'utf8'), 'Manual report draft');
+  }
 });
 
 test('only generated pages are quiet; peer receipts prompt once until adopted, across restarts', async t => {

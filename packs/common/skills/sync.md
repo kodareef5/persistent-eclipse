@@ -42,12 +42,12 @@ LAB.md names the approved private destination:
 
 `Sync: origin main` enables background sharing after manager-reviewed commits;
 it can combine clean changes and rebuild generated reports, then run the outgoing
-history check and push. It leaves the live checkout and index alone. When shared
+history check and push. It leaves research files and drafts alone. When shared
 research is ready, the manager gets one notice at the next turn boundary and brings it in with
 `node .research/tools/sync.mjs` at a useful pause. Research can continue meanwhile.
 It never commits drafts or resolves research conflicts.
-Generated pages alone count as synced; they can wait for the next convenient
-fast-forward. Citation advice stays in status views, without repeated reminders.
+Clean generated-only changes fast-forward quietly, avoiding a merge on the next
+contribution. Staged work or edited views defer that adoption. Citation advice stays in status views, without repeated reminders.
 `Auto sync: off` keeps reconciliation and publishing manager initiated through
 `node .research/tools/sync.mjs`. `Sync: off` disables sharing entirely. An omitted
 branch means `main`; no Sync line or no approved remote means local operation.
@@ -170,6 +170,9 @@ Include `.research/activity/` receipts in ordinary research commits. They let
 pe-history report the labs' collective effort without sharing transcripts.
 Background capture adds immutable, versioned batches. Shared pages update at sync,
 not on the capture timer; the live Pi/DSH views remain current between commits.
+Managers commit meaningful contributions and reviewed receipts. Let sync render
+and publish their views; do not run record/activity builds after each result or
+merge. A generated-only difference is not another investigation or cleanup task.
 Older labs can omit receipts; their accounting stays unknown, and their work still
 belongs in the shared record.
 
@@ -201,7 +204,7 @@ on distinct IDs before continuing the merge.
 | Notes and runs | The owning lab edits them. Send a correction or write a linked note that supports or refutes theirs. |
 | `labs/<lab>/` | Each lab maintains its own folder. |
 | `updates/` | Add Markdown contributions; the manager reconciles substantive disagreements. |
-| `REPORT.md`, activity pages and SVGs | Generated views. Sync rebuilds from committed inputs. For a manual build, include the outputs in that commit. |
+| `REPORT.md`, activity pages and SVGs | Sync owns these generated views. Commit their inputs, not hand-rendered pages; do not create separate rendering commits. |
 | `status-reports/`, `SUMMARY.md` | Earlier reports remain readable. New updates use pe-status-report. |
 | `intel/INDEX.md`, `RUNS.md`, `FEEDBACK.md`, `LABELS.md` | Append; use the union merge rules below. |
 | STATUS, FRONTIER, MAP, SOURCES, MISSION, SCOPE, LAB | Pull before editing, keep edits focused, and preserve others' facts. |

@@ -18,6 +18,11 @@ README, remote-operation guide, and banner skip that build. Runtime prose and
 mission packs still count as source. Run tests locally; optional hosted tests are
 manual: `gh workflow run test.yml`.
 
+In Pi, `/pe-questions` opens the operator inbox. Choose a question, select Answer,
+and save your reply in the editor. Esc leaves it unchanged. Research keeps running;
+answers reach the manager on its next turn. Answered questions remain available
+in the inbox. The footer shows the command when questions are waiting.
+
 ## Content
 
 A lab selects `red`, `blue`, `math`, or `signals` in `.research/packs.json`:
@@ -140,7 +145,8 @@ and measured turn durations. `.research/activity/README.md` and its SVGs are the
 Git view; `/pe-usage [lab]` and DSH's Activity view show live data. Background scans
 append immutable `pe-activity-receipts/1` batches and update local previews.
 Commit reviewed inputs and receipts; approved background sync combines and shares
-them from a temporary snapshot, leaving the checkout and index alone. The manager
+them from a temporary snapshot. Clean generated-only changes fast-forward quietly;
+staged work or edited views defer that adoption. Research and drafts stay untouched. The manager
 gets one notice at a turn boundary for incoming research and runs
 `node .research/tools/sync.mjs` at a useful pause to adopt it. Report-only changes
 count as synced. Receiving alone never re-renders another engine version's pages.

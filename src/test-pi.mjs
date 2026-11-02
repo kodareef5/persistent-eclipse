@@ -190,7 +190,8 @@ function goalSession(cwd, sessionFile) {
   }
   const snapshot = async () => (await branch()).findLast(e => e.type === 'custom' && e.customType === 'pe-goal')?.data.goal ?? null
   const close = async () => { child.kill('SIGKILL'); await until(() => child.exitCode !== null || child.signalCode !== null) }
-  return {rpc, prompt, settled, waitSettled, branch, snapshot, close, events}
+  return {rpc, prompt, settled, waitSettled, branch, snapshot, close, events,
+    replyUI: response => child.stdin.write(JSON.stringify({type: 'extension_ui_response', ...response}) + '\n')}
 }
 
 // Several prompts in one RPC session, the way a live Pi session runs them. Print mode
@@ -501,6 +502,38 @@ try {
     writeFileSync(join(historyLab, '.research/LAB.md'), '# lab\nHistory: off\n')
     await run(['-p', '--provider', 'probe', '--model', 'probe', 'Leave this session out.'], historyLab)
     check(reportData(historyLab).usage.sessions.length === 1, 'history: History off stops automatic capture')
+  }
+
+  // Open and answer the inbox while the provider is still working. UI commands
+  // must not cancel the request, steer it, or launch another model turn.
+  {
+    const q = questions.submit(lab, {question: 'Which experiment?', affected: 'Next step', proposedDefault: 'Wait'});
+    const s = goalSession(lab), gate = deferred(), previousAnswer = answer;
+    answer = async () => { await gate.promise; return 'Original work finished.'; };
+    const start = requests.length;
+    try {
+      const work = s.prompt('Keep working while I use the inbox.');
+      await until(() => requests.length > start);
+      const command = s.rpc({type: 'prompt', message: '/pe-questions'});
+      const dialog = async method => {
+        await until(() => s.events.some(e => e.type === 'extension_ui_request' && e.method === method && !e.handled));
+        const e = s.events.find(e => e.type === 'extension_ui_request' && e.method === method && !e.handled);
+        e.handled = true; return e;
+      };
+      const pick = await dialog('select');s.replyUI({id: pick.id, value: pick.options[0]});
+      const detail = await dialog('select');s.replyUI({id: detail.id, value: 'Answer'});
+      const editor = await dialog('editor');s.replyUI({id: editor.id, value: 'Use the smaller fixture.'});
+      const again = await dialog('select');s.replyUI({id: again.id, cancelled: true});
+      await command;
+      check(questions.list(lab).find(x => x.id === q.id)?.answer === 'Use the smaller fixture.' &&
+        requests.length === start + 1 && s.settled() === 0,
+        'questions: interactive inbox saves an answer while the original provider request remains running');
+      gate.resolve();await work;
+      answer = previousAnswer;
+      await s.prompt('Continue.');
+      check((await s.branch()).filter(e => e.customType === 'pe-answer').length === 1,
+        'questions: the UI answer arrives only at the next manager turn');
+    } finally {gate.resolve();answer = previousAnswer;await s.close();rmSync(join(lab,'.research/questions'),{recursive:true,force:true});}
   }
 
   // Answers are durable input, delivered once on a real session's next turn.
@@ -1872,6 +1905,7 @@ finally:
       reactionAnswer = async request => {
         reviews.push(request)
         if (held) await reaction.promise
+        if (typeof reply === 'function') return reply(request)
         return typeof reply === 'string' ? {text: reply, usage: {prompt_tokens: 200, completion_tokens: 30, total_tokens: 230}} : reply
       }
       answer = async request => {
@@ -1909,11 +1943,12 @@ finally:
     const f = await fixture()
     try {
       await until(() => f.denied())
-      const request = f.reviews[0], state = JSON.parse(parse(request).user)
-      check(f.reviews.length === 1 && request.messages.length === 2 && (request.tools ?? []).length === 0 && request.model === 'probe' &&
-        !JSON.stringify(request).includes('PRIVATE_EARLIER_TURN') && state.mission.includes('Keep the operator mission intact.') &&
-        state.scope.includes('Only the supplied construction.') && state.workers.length === 1 && state.latestReply.includes('wait for evidence'),
-        'idle reaction: fresh tool-free context inherits the model and carries mission, limits, last reply, and a full fleet')
+      const request = f.reviews[0], brief = parse(request).user
+      const tools = (request.tools ?? []).map(t => t.function?.name ?? t.name).sort().join(',')
+      check(f.reviews.length === 1 && request.messages.length === 2 && tools === 'find,grep,ls,read' && request.model === 'probe' &&
+        !JSON.stringify(request).includes('PRIVATE_EARLIER_TURN') && brief.includes('Start with .research/MISSION.md, .research/SCOPE.md') &&
+        brief.includes('Find the actual boundary.') && brief.includes('- T-1:') && brief.includes('wait for evidence'),
+        'idle reaction: fresh read-only context inherits the model and points at mission, limits, last reply, and the fleet', tools)
       check((await f.s.snapshot()).roundsStarted === 0 && (await f.s.snapshot()).phase === 'active',
         'idle reaction: advice spends no round and has no operator authority')
       await f.s.prompt('Keep considering the boundary.')
@@ -1933,10 +1968,10 @@ finally:
     const shared = await fixture({shared: true, reply: 'WAIT'})
     try {
       await until(() => shared.reviews.length === 1)
-      const state = JSON.parse(parse(shared.reviews[0]).user)
-      check(state.labName === 'redfox' && state.queue.file === '.research/labs/redfox/QUEUE.md' && state.queue.text.includes('OWN_QUEUE') &&
-        state.status.file === '.research/STATUS.md' && !('cadence' in state) && !('fleet' in state),
-        "idle reaction: a shared lab reads this clone's own queue, names each file, and omits missing ones", JSON.stringify(state).slice(0, 600))
+      const brief = parse(shared.reviews[0]).user
+      check(brief.includes('This clone is redfox') && brief.includes('.research/labs/redfox/QUEUE.md') &&
+        brief.includes('.research/STATUS.md') && !brief.includes('CADENCE.md') && !brief.includes('FLEET.md'),
+        "idle reaction: a shared lab points at this clone's own queue and omits missing records", brief.slice(0, 600))
     } finally { await shared.close() }
     const inherited = await fixture({reasoner: true, reply: 'WAIT'})
     try {
@@ -1944,6 +1979,22 @@ finally:
       check(inherited.reviews[0].model === 'reasoner' && inherited.reviews[0].reasoning_effort === 'low',
         'idle reaction: reviewer inherits the exact manager model and effort')
     } finally { await inherited.close() }
+    const evidence = 'The boundary case was dismissed without testing its default.'
+    const reading = await fixture({reply: request => toolResults(request).includes(evidence)
+      ? {text: suggestion} : tool('read', {path: '.research/STATUS.md'})})
+    try {
+      await until(() => reading.sawReaction() > 0, () => JSON.stringify({reviews: reading.reviews.length}))
+      check(reading.reviews.length === 2 && toolResults(reading.reviews[1]).includes(evidence),
+        'idle reaction: the reviewer reads lab evidence before reacting')
+    } finally { await reading.close() }
+    const greedy = await fixture({reply: request => toolResults(request).includes("That's enough reading")
+      ? {text: suggestion} : tool('read', {path: '.research/STATUS.md'})})
+    try {
+      await until(() => greedy.sawReaction() > 0, () => JSON.stringify({reviews: greedy.reviews.length}))
+      const results = greedy.reviews.at(-1).messages.filter(m => m.role === 'tool').map(m => JSON.stringify(m.content))
+      check(results.filter(r => r.includes('dismissed without testing')).length === 12 && results.length === 13,
+        'idle reaction: past its reading budget, a declined read brings the answer', String(results.length))
+    } finally { await greedy.close() }
 
     const extensionFile = join(pkg, 'extension.ts'), original = readFileSync(extensionFile, 'utf8')
     try {
@@ -1955,11 +2006,11 @@ finally:
         await repeated.s.prompt('Consider the evidence again.')
         await until(() => repeated.reviews.length >= 2)
         await sleep(150)
-        const prior = JSON.parse(parse(repeated.reviews[1]).user).recentReactions
+        const prior = parse(repeated.reviews[1]).user.split('Your recent reactions:')[1] ?? ''
         check(prior.includes(suggestion) && (await repeated.s.branch()).filter(e => e.type === 'custom_message' && e.customType === 'pe-idle-reaction').length === 1,
           'idle reaction: later reviews see prior advice and exact repeats are not delivered')
       } finally { await repeated.close() }
-      writeFileSync(extensionFile, original.replace('setTimeout(() => controller.abort(), 90_000)', 'setTimeout(() => controller.abort(), 200)'))
+      writeFileSync(extensionFile, original.replace('REVIEW_HARD_MS = 10 * 60_000', 'REVIEW_HARD_MS = 200'))
       const timed = await fixture({held: true})
       try {
         await until(() => timed.reviews.length === 1)

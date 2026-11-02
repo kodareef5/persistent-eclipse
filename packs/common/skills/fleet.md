@@ -71,8 +71,9 @@ thin out, ask pe-muse. A useful brief gives the full mission, a question, and ro
 to find an unexpected answer.
 
 Keep investigating yourself in short pieces while the researchers work: read source,
-follow a contradiction, or try a small experiment. Update STATUS with what we learned,
-what's uncertain, and what looks worth trying next.
+follow a contradiction, or try a small experiment. When the picture changes, update
+the current account with what we learned and what looks worth trying next. Link it
+from coordination records rather than copying the same recap into each one.
 
 ## While researchers work
 
